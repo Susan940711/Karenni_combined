@@ -111,6 +111,34 @@ def cleaned_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(as_str, errors="coerce")
 
 
+def find_column_by_token(df: pd.DataFrame, token: str) -> str | None:
+    for col in df.columns:
+        if token in normalize_name(col):
+            return col
+    return None
+
+
+def filter_summary_township_rows(df: pd.DataFrame) -> pd.DataFrame:
+    township_col = find_column_by_token(df, "township")
+    clinic_col = find_column_by_token(df, "clinic")
+
+    if township_col is None:
+        return df
+
+    working = df.copy()
+    township_values = working[township_col].astype("string").fillna("").str.strip()
+
+    # Keep only rows that have a township value.
+    mask = township_values != ""
+
+    # Exclude clinic-level rows (clinic name/code is present).
+    if clinic_col is not None:
+        clinic_values = working[clinic_col].astype("string").fillna("").str.strip()
+        mask = mask & (clinic_values == "")
+
+    return working.loc[mask].reset_index(drop=True)
+
+
 def detect_dimension_columns(df: pd.DataFrame) -> tuple[list[str], list[str]]:
     organization_col = next((c for c in df.columns if normalize_name(c) == "organization"), "Organization")
     protected_tokens = [
@@ -206,6 +234,11 @@ def combine_sheet(chdn_path: Path, kna_path: Path, canonical_sheet: str, aliases
 
     chdn_df, kna_df = align_columns(chdn_df, kna_df)
     combined = pd.concat([chdn_df, kna_df], ignore_index=True)
+
+    # Summary sheet should include only township-level rows and no appended totals.
+    if canonical_sheet == "indicators":
+        return filter_summary_township_rows(combined)
+
     return append_karenni_total_rows(combined)
 
 
@@ -214,7 +247,10 @@ def parse_args() -> argparse.Namespace:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     parser = argparse.ArgumentParser(
-        description="Combine CHDN and KNA reports and append Karenni Total rows for key indicator sheets."
+        description=(
+            "Combine CHDN and KNA reports; keep township-level rows only in indicators "
+            "and append Karenni Total rows in other target sheets."
+        )
     )
     parser.add_argument(
         "--chdn",
