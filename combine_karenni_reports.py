@@ -49,6 +49,61 @@ def align_columns(primary: pd.DataFrame, secondary: pd.DataFrame) -> tuple[pd.Da
     return primary.reindex(columns=ordered), secondary.reindex(columns=ordered)
 
 
+def is_empty_value(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and pd.isna(value):
+        return True
+    if isinstance(value, str) and value.strip() == "":
+        return True
+    return False
+
+
+def canonicalize_alod_label(value: object) -> str:
+    text = "" if is_empty_value(value) else str(value).strip()
+    norm = normalize_name(text)
+
+    if not norm:
+        return ""
+
+    # Treat CHDN variants like "ALOD cummulative" as the same indicator label.
+    if "alod" in norm and ("cummu" in norm or "cumu" in norm or "cumul" in norm):
+        return "At least one dose under 5-yr-old"
+
+    if "atleastonedoseunder5" in norm:
+        return "At least one dose under 5-yr-old"
+
+    return text
+
+
+def harmonize_alod_cummu_indicator_columns(df: pd.DataFrame) -> pd.DataFrame:
+    has_indicator_upper = "Indicator" in df.columns
+    has_indicator_lower = "indicator" in df.columns
+
+    if not has_indicator_upper and not has_indicator_lower:
+        return df
+
+    if not has_indicator_upper:
+        df["Indicator"] = ""
+    if not has_indicator_lower:
+        df["indicator"] = ""
+
+    def resolve_row_label(row: pd.Series) -> str:
+        upper_val = row.get("Indicator", "")
+        lower_val = row.get("indicator", "")
+
+        if not is_empty_value(upper_val):
+            return canonicalize_alod_label(upper_val)
+        if not is_empty_value(lower_val):
+            return canonicalize_alod_label(lower_val)
+        return ""
+
+    merged_label = df.apply(resolve_row_label, axis=1)
+    df["Indicator"] = merged_label
+    df["indicator"] = merged_label
+    return df
+
+
 def cleaned_numeric(series: pd.Series) -> pd.Series:
     as_str = series.astype(str).str.replace(",", "", regex=False).str.strip()
     as_str = as_str.where(~series.isna(), other="")
@@ -144,6 +199,10 @@ def read_target_sheet(path: Path, canonical_sheet: str, aliases: list[str]) -> p
 def combine_sheet(chdn_path: Path, kna_path: Path, canonical_sheet: str, aliases: list[str]) -> pd.DataFrame:
     chdn_df = read_target_sheet(chdn_path, canonical_sheet, aliases)
     kna_df = read_target_sheet(kna_path, canonical_sheet, aliases)
+
+    if canonical_sheet == "ALOD_cummu":
+        chdn_df = harmonize_alod_cummu_indicator_columns(chdn_df)
+        kna_df = harmonize_alod_cummu_indicator_columns(kna_df)
 
     chdn_df, kna_df = align_columns(chdn_df, kna_df)
     combined = pd.concat([chdn_df, kna_df], ignore_index=True)
