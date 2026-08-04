@@ -38,7 +38,10 @@ def main() -> None:
     st.set_page_config(page_title="Karenni CHDN + KNA Combiner", layout="wide")
 
     st.title("Karenni Combination Builder")
-    st.caption("Combine CHDN and KNA report sheets and append Karenni Total rows to Organization.")
+    st.caption(
+        "Combine CHDN and KNA report sheets. The summary sheet keeps township-level rows only "
+        "(clinic rows removed) and does not append Karenni Total rows."
+    )
 
     with st.expander("Target sheets", expanded=True):
         st.write("This app combines and outputs these sheets only:")
