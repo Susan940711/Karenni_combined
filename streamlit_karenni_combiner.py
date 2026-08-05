@@ -9,8 +9,10 @@ import pandas as pd
 import streamlit as st
 
 from combine_karenni_reports import (
+    AT_LEAST_ONE_SEMESTER_SHEET_NAME,
     SEMESTER_REPORT_SHEET_NAME,
     TARGET_SHEETS,
+    build_at_least_one_semester_from_alod,
     build_semester_report_from_sheet_map,
     combine_sheet,
     write_sheet_with_aliases,
@@ -27,6 +29,8 @@ def build_combined_workbook(chdn_path: Path, kna_path: Path) -> tuple[bytes, dic
 
     if "indicators" in sheet_map:
         sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_sheet_map(sheet_map)
+    if "ALOD_cummu" in sheet_map:
+        sheet_map[AT_LEAST_ONE_SEMESTER_SHEET_NAME] = build_at_least_one_semester_from_alod(sheet_map["ALOD_cummu"])
 
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
