@@ -9,7 +9,7 @@ import pandas as pd
 
 
 TARGET_SHEETS: dict[str, list[str]] = {
-    "indicators": ["indicators", "indicator"],
+    "Summary": ["Summary", "summary", "indicators", "indicator"],
     "Td_ALOD": ["Td_ALOD", "Td ALOD", "Td_alod", "TD_ALOD"],
     "ALOD_cummu": ["ALOD_cummu", "ALOD cummu"],
     "IDP": ["IDP", "idp"],
@@ -236,7 +236,7 @@ def combine_sheet(chdn_path: Path, kna_path: Path, canonical_sheet: str, aliases
     combined = pd.concat([chdn_df, kna_df], ignore_index=True)
 
     # Summary sheet should include only township-level rows and no appended totals.
-    if canonical_sheet == "indicators":
+    if canonical_sheet == "Summary":
         return filter_summary_township_rows(combined)
 
     return append_karenni_total_rows(combined)
@@ -248,7 +248,7 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Combine CHDN and KNA reports; keep township-level rows only in indicators "
+            "Combine CHDN and KNA reports; keep township-level rows only in Summary "
             "and append Karenni Total rows in other target sheets."
         )
     )
