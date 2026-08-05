@@ -110,6 +110,45 @@ def harmonize_alod_cummu_indicator_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def coalesce_idp_dimension_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Coalesce case/spacing variants for IDP dimension keys before grouping totals."""
+    if df.empty:
+        return df
+
+    # Keep only one physical column per semantic key to avoid split group keys
+    # like Period vs period or Project Name vs project_name.
+    key_groups = {
+        "Period": [c for c in df.columns if normalize_name(c) == "period"],
+        "Year": [c for c in df.columns if normalize_name(c) == "year"],
+        "Organization": [c for c in df.columns if normalize_name(c) == "organization"],
+        "Project Name": [c for c in df.columns if "project" in normalize_name(c)],
+        "Indicator": [c for c in df.columns if normalize_name(c) == "indicator"],
+    }
+
+    working = df.copy()
+    for canonical, cols in key_groups.items():
+        if not cols:
+            continue
+
+        merged = pd.Series(pd.NA, index=working.index, dtype="object")
+        for col in cols:
+            as_text = working[col].astype("string")
+            non_empty = as_text.notna() & (as_text.str.strip() != "")
+            merged = merged.mask(merged.isna() & non_empty, as_text)
+
+        if canonical in working.columns and canonical not in cols:
+            existing = working[canonical].astype("string")
+            existing_non_empty = existing.notna() & (existing.str.strip() != "")
+            merged = merged.mask(merged.isna() & existing_non_empty, existing)
+
+        working[canonical] = merged
+        drop_cols = [c for c in cols if c != canonical]
+        if drop_cols:
+            working = working.drop(columns=drop_cols)
+
+    return working
+
+
 def cleaned_numeric(series: pd.Series) -> pd.Series:
     as_str = series.astype(str).str.replace(",", "", regex=False).str.strip()
     as_str = as_str.where(~series.isna(), other="")
@@ -835,6 +874,9 @@ def combine_sheet(chdn_path: Path, kna_path: Path, canonical_sheet: str, aliases
 
     chdn_df, kna_df = align_columns(chdn_df, kna_df)
     combined = pd.concat([chdn_df, kna_df], ignore_index=True)
+
+    if canonical_sheet == "IDP":
+        combined = coalesce_idp_dimension_columns(combined)
 
     # Summary sheet should include only township-level rows and no appended totals.
     if canonical_sheet == "Summary":
