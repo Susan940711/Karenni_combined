@@ -557,6 +557,9 @@ def build_semester_report_from_indicators(
         semester_indicator_col = next((c for c in semester_df.columns if normalize_name(c) == "indicator"), None)
         project_col = next((c for c in semester_df.columns if "project" in normalize_name(c)), None)
         alod_project_col = next((c for c in alod_frame.columns if "project" in normalize_name(c)), None)
+        alod_period_col = next((c for c in alod_frame.columns if normalize_name(c) == "period"), None)
+        semester_organization_col = next((c for c in semester_df.columns if normalize_name(c) == "organization"), None)
+        alod_organization_col = next((c for c in alod_frame.columns if normalize_name(c) == "organization"), None)
 
         if alod_indicator_col is not None and semester_indicator_col is not None:
             semester_target_mask = (
@@ -571,48 +574,54 @@ def build_semester_report_from_indicators(
             if not alod_target.empty:
                 key_pairs: list[tuple[str, str]] = []
                 for left_col, right_col in [
-                    (period_col, period_col),
-                    (semester_indicator_col, alod_indicator_col),
-                    (organization_col, organization_col if organization_col in alod_frame.columns else None),
+                    (period_col, alod_period_col),
+                    (semester_organization_col, alod_organization_col),
                     (project_col, alod_project_col),
                 ]:
-                    if left_col is not None and right_col is not None and right_col in alod_frame.columns:
+                    if left_col is not None and right_col is not None:
                         key_pairs.append((left_col, right_col))
+
+                def score_rows(frame: pd.DataFrame) -> pd.DataFrame:
+                    scored = frame.copy()
+                    scored["__score"] = scored[metric_columns].sum(axis=1, min_count=1).fillna(0)
+                    scored["__is_karenni"] = False
+                    if alod_organization_col is not None:
+                        scored["__is_karenni"] = scored[alod_organization_col].astype("string").fillna("").str.strip().eq("Karenni Total")
+                    return scored.sort_values(by=["__score", "__is_karenni"], ascending=[False, False])
+
+                def select_alod_row(left_index: int) -> pd.Series:
+                    tiers: list[pd.DataFrame] = []
+
+                    exact = alod_target
+                    for left_col, right_col in key_pairs:
+                        left_value = semester_df.at[left_index, left_col] if left_col in semester_df.columns else None
+                        exact = exact[exact[right_col].astype("string").fillna("").str.strip() == str(left_value).strip()]
+                    if not exact.empty:
+                        tiers.append(exact)
+
+                    period_only = alod_target
+                    if alod_period_col is not None and period_col in semester_df.columns:
+                        left_value = semester_df.at[left_index, period_col]
+                        period_only = period_only[
+                            period_only[alod_period_col].astype("string").fillna("").str.strip() == str(left_value).strip()
+                        ]
+                        if not period_only.empty:
+                            tiers.append(period_only)
+
+                    tiers.append(alod_target)
+
+                    for candidate in tiers:
+                        scored = score_rows(candidate)
+                        if not scored.empty:
+                            top = scored.iloc[0]
+                            if float(top["__score"]) > 0:
+                                return top
+
+                    return score_rows(alod_target).iloc[0]
 
                 target_rows = semester_df.index[semester_target_mask].tolist()
                 for row_index in target_rows:
-                    row_mask = pd.Series(True, index=alod_target.index)
-                    for left_col, right_col in key_pairs:
-                        left_value = semester_df.at[row_index, left_col] if left_col in semester_df.columns else None
-                        if right_col in alod_target.columns:
-                            row_mask &= alod_target[right_col].astype("string").fillna("").str.strip() == str(left_value).strip()
-
-                    matching_rows = alod_target.loc[row_mask]
-                    if matching_rows.empty:
-                        matching_rows = alod_target.iloc[[0]]
-
-                    if len(matching_rows) > 1:
-                        org_match_col = next((c for c in matching_rows.columns if normalize_name(c) == "organization"), None)
-                        score_series = matching_rows[metric_columns].sum(axis=1, min_count=1).fillna(0)
-                        matching_rows = matching_rows.assign(__score=score_series)
-                        if org_match_col is not None:
-                            matching_rows = matching_rows.sort_values(
-                                by=[org_match_col, "__score"],
-                                ascending=[True, False],
-                                key=lambda s: s.astype(str).str.lower() if s.name == org_match_col else s,
-                            )
-                            karenni_total_rows = matching_rows[
-                                matching_rows[org_match_col].astype("string").fillna("").str.strip().eq("Karenni Total")
-                            ]
-                            if not karenni_total_rows.empty:
-                                matching_rows = karenni_total_rows.sort_values(by="__score", ascending=False)
-                        else:
-                            matching_rows = matching_rows.sort_values(by="__score", ascending=False)
-
-                    if "__score" in matching_rows.columns:
-                        matching_rows = matching_rows.drop(columns=["__score"])
-
-                    source_row = matching_rows.iloc[0]
+                    source_row = select_alod_row(row_index)
                     for metric_col in metric_columns:
                         if metric_col in source_row:
                             semester_df.at[row_index, metric_col] = source_row[metric_col]
