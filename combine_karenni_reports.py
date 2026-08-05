@@ -25,6 +25,20 @@ def normalize_name(value: str) -> str:
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
 
+def normalize_key_value(value: object) -> str:
+    if is_empty_value(value):
+        return ""
+    text = str(value).strip()
+    # Align keys like 2026 and 2026.0 across sheets.
+    try:
+        num = float(text.replace(",", ""))
+        if num.is_integer():
+            return str(int(num))
+    except Exception:
+        pass
+    return text
+
+
 def resolve_sheet_name(workbook: pd.ExcelFile, aliases: list[str]) -> str:
     wanted = {normalize_name(name) for name in aliases}
     for sheet in workbook.sheet_names:
@@ -368,9 +382,9 @@ def build_alod_semester_lookup(source_df: pd.DataFrame) -> dict[tuple[str, str, 
         if label != SEMESTER_ALOD_OVERRIDE_LABEL:
             continue
 
-        period_value = str(row.get(period_col, "")).strip() if period_col is not None else ""
-        organization_value = str(row.get(organization_col, "")).strip() if organization_col is not None else ""
-        project_value = str(row.get(project_col, "")).strip() if project_col is not None else ""
+        period_value = normalize_key_value(row.get(period_col, "")) if period_col is not None else ""
+        organization_value = normalize_key_value(row.get(organization_col, "")) if organization_col is not None else ""
+        project_value = normalize_key_value(row.get(project_col, "")) if project_col is not None else ""
 
         key = (period_value, organization_value, project_value, label)
         score = float(pd.Series([row.get(metric, 0) for metric in metric_columns]).sum())
@@ -604,9 +618,9 @@ def build_semester_report_from_indicators(
             ].tolist()
 
             for row_index in target_rows:
-                period_value = str(semester_df.at[row_index, period_col]).strip()
-                org_value = str(semester_df.at[row_index, semester_organization_col]).strip() if semester_organization_col in semester_df.columns else ""
-                project_value = str(semester_df.at[row_index, project_col]).strip() if project_col in semester_df.columns else ""
+                period_value = normalize_key_value(semester_df.at[row_index, period_col])
+                org_value = normalize_key_value(semester_df.at[row_index, semester_organization_col]) if semester_organization_col in semester_df.columns else ""
+                project_value = normalize_key_value(semester_df.at[row_index, project_col]) if project_col in semester_df.columns else ""
                 key_candidates = [
                     (period_value, org_value, project_value, SEMESTER_ALOD_OVERRIDE_LABEL),
                     (period_value, "", project_value, SEMESTER_ALOD_OVERRIDE_LABEL),
