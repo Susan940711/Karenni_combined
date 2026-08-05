@@ -40,7 +40,8 @@ def main() -> None:
     st.title("Karenni Combination Builder")
     st.caption(
         "Combine CHDN and KNA report sheets. The Summary sheet rolls clinic data up to township level, "
-        "removes the clinic column, and does not append Karenni Total rows."
+        "outputs Period as S1/S2/Annual from quarterly data, removes the clinic column, "
+        "and does not append Karenni Total rows."
     )
 
     with st.expander("Target sheets", expanded=True):
