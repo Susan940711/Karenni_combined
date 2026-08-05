@@ -20,6 +20,7 @@ TARGET_SHEETS: dict[str, list[str]] = {
 SEMESTER_REPORT_SHEET_NAME = "semester report"
 AT_LEAST_ONE_SEMESTER_SHEET_NAME = "AT_LEAST_ONE_semester"
 AGE_SEMESTER_SHEET_NAME = "Age_semester"
+IDP_SEMESTER_SHEET_NAME = "idp_semester"
 
 
 def normalize_name(value: str) -> str:
@@ -593,6 +594,127 @@ def build_age_semester_from_sheet_map(sheet_map: dict[str, pd.DataFrame]) -> pd.
     return build_age_semester_from_indicators(sheet_map["indicators"])
 
 
+def build_idp_semester_from_indicators(indicators_df: pd.DataFrame) -> pd.DataFrame:
+    period_key = "Period"
+    organization_key = "Organization"
+    project_key = "Project Name"
+    indicator_key = "indicator"
+    metric_cols = [
+        "S1 IDP Male", "S1 IDP Female", "S1 non-IDP Male", "S1 non-IDP Female",
+        "S2 IDP Male", "S2 IDP Female", "S2 non-IDP Male", "S2 non-IDP Female",
+        "Annual IDP Male", "Annual IDP Female", "Annual non-IDP Male", "Annual non-IDP Female",
+    ]
+
+    if indicators_df.empty:
+        return pd.DataFrame(columns=[period_key, organization_key, project_key, indicator_key, *metric_cols])
+
+    def quarter_metric_columns(
+        quarter: int,
+        required_tokens: list[str],
+        banned_tokens: list[str] | None = None,
+    ) -> list[str]:
+        banned_tokens = banned_tokens or []
+        quarter_tokens = [f"q{quarter}", f"quarter{quarter}", f"qtr{quarter}"]
+
+        matches: list[str] = []
+        for col in indicators_df.columns:
+            norm = normalize_name(col)
+            if not any(token in norm for token in quarter_tokens):
+                continue
+            if any(token not in norm for token in required_tokens):
+                continue
+            if any(bad in norm for bad in banned_tokens):
+                continue
+            matches.append(col)
+        return matches
+
+    q_cols: dict[int, dict[str, list[str]]] = {}
+    for q in [1, 2, 3, 4]:
+        q_cols[q] = {
+            "idp_male": quarter_metric_columns(q, ["idp", "male"], banned_tokens=["female", "nonidp"]),
+            "idp_female": quarter_metric_columns(q, ["idp", "female"], banned_tokens=["nonidp"]),
+            "non_idp_male": quarter_metric_columns(q, ["nonidp", "male"], banned_tokens=["female"]),
+            "non_idp_female": quarter_metric_columns(q, ["nonidp", "female"]),
+        }
+
+    quarter_value_cols = list(
+        dict.fromkeys(
+            col
+            for q in [1, 2, 3, 4]
+            for cols in q_cols[q].values()
+            for col in cols
+        )
+    )
+
+    working = indicators_df.copy()
+    for col in quarter_value_cols:
+        working[col] = cleaned_numeric(working[col])
+
+    indicator_col = next((c for c in working.columns if normalize_name(c) == "indicator"), None)
+
+    def is_penta1(value: object) -> bool:
+        norm = normalize_name(value)
+        return "penta1" in norm or ("penta" in norm and "1" in norm)
+
+    if indicator_col is not None:
+        working = working.loc[working[indicator_col].apply(is_penta1)].copy()
+    else:
+        working = working.iloc[0:0].copy()
+
+    if working.empty:
+        return pd.DataFrame(columns=[period_key, organization_key, project_key, indicator_key, *metric_cols])
+
+    def row_sum(frame: pd.DataFrame, names: list[str]) -> pd.Series:
+        present = [name for name in names if name in frame.columns]
+        if not present:
+            return pd.Series(0, index=frame.index, dtype="float64")
+        return frame[present].sum(axis=1, min_count=1).fillna(0)
+
+    period_col = find_column_by_token(working, "period")
+    organization_col = next((c for c in working.columns if normalize_name(c) == "organization"), None)
+    project_col = next((c for c in working.columns if "project" in normalize_name(c)), None)
+
+    output = pd.DataFrame(index=working.index)
+    output[period_key] = working[period_col] if period_col is not None else ""
+    output[organization_key] = working[organization_col] if organization_col is not None else ""
+    output[project_key] = working[project_col] if project_col is not None else ""
+    output[indicator_key] = working[indicator_col] if indicator_col is not None else ""
+
+    output["S1 IDP Male"] = row_sum(working, q_cols[1]["idp_male"] + q_cols[2]["idp_male"])
+    output["S1 IDP Female"] = row_sum(working, q_cols[1]["idp_female"] + q_cols[2]["idp_female"])
+    output["S1 non-IDP Male"] = row_sum(working, q_cols[1]["non_idp_male"] + q_cols[2]["non_idp_male"])
+    output["S1 non-IDP Female"] = row_sum(working, q_cols[1]["non_idp_female"] + q_cols[2]["non_idp_female"])
+
+    output["S2 IDP Male"] = row_sum(working, q_cols[3]["idp_male"] + q_cols[4]["idp_male"])
+    output["S2 IDP Female"] = row_sum(working, q_cols[3]["idp_female"] + q_cols[4]["idp_female"])
+    output["S2 non-IDP Male"] = row_sum(working, q_cols[3]["non_idp_male"] + q_cols[4]["non_idp_male"])
+    output["S2 non-IDP Female"] = row_sum(working, q_cols[3]["non_idp_female"] + q_cols[4]["non_idp_female"])
+
+    output["Annual IDP Male"] = row_sum(
+        working,
+        q_cols[1]["idp_male"] + q_cols[2]["idp_male"] + q_cols[3]["idp_male"] + q_cols[4]["idp_male"],
+    )
+    output["Annual IDP Female"] = row_sum(
+        working,
+        q_cols[1]["idp_female"] + q_cols[2]["idp_female"] + q_cols[3]["idp_female"] + q_cols[4]["idp_female"],
+    )
+    output["Annual non-IDP Male"] = row_sum(
+        working,
+        q_cols[1]["non_idp_male"] + q_cols[2]["non_idp_male"] + q_cols[3]["non_idp_male"] + q_cols[4]["non_idp_male"],
+    )
+    output["Annual non-IDP Female"] = row_sum(
+        working,
+        q_cols[1]["non_idp_female"] + q_cols[2]["non_idp_female"] + q_cols[3]["non_idp_female"] + q_cols[4]["non_idp_female"],
+    )
+
+    output[metric_cols] = output[metric_cols].fillna(0)
+    return output.reset_index(drop=True)
+
+
+def build_idp_semester_from_sheet_map(sheet_map: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    return build_idp_semester_from_indicators(sheet_map["indicators"])
+
+
 def build_at_least_one_semester_from_alod(alod_df: pd.DataFrame) -> pd.DataFrame:
     if alod_df.empty:
         return alod_df.copy()
@@ -771,6 +893,7 @@ def main() -> None:
         if "indicators" in sheet_map:
             sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_sheet_map(sheet_map)
             sheet_map[AGE_SEMESTER_SHEET_NAME] = build_age_semester_from_sheet_map(sheet_map)
+            sheet_map[IDP_SEMESTER_SHEET_NAME] = build_idp_semester_from_sheet_map(sheet_map)
         if "ALOD_cummu" in sheet_map:
             sheet_map[AT_LEAST_ONE_SEMESTER_SHEET_NAME] = build_at_least_one_semester_from_alod(sheet_map["ALOD_cummu"])
     except PermissionError as exc:
