@@ -118,16 +118,41 @@ def find_column_by_token(df: pd.DataFrame, token: str) -> str | None:
     return None
 
 
+def canonical_quarter_label(value: object) -> str | None:
+    if is_empty_value(value):
+        return None
+
+    norm = normalize_name(str(value))
+    if not norm:
+        return None
+
+    q1_tokens = ["q1", "quarter1", "qtr1", "firstquarter", "1stquarter", "janmar"]
+    q2_tokens = ["q2", "quarter2", "qtr2", "secondquarter", "2ndquarter", "aprjun"]
+    q3_tokens = ["q3", "quarter3", "qtr3", "thirdquarter", "3rdquarter", "julsep"]
+    q4_tokens = ["q4", "quarter4", "qtr4", "fourthquarter", "4thquarter", "octdec"]
+
+    if norm in {"1", "01"} or any(token in norm for token in q1_tokens):
+        return "Q1"
+    if norm in {"2", "02"} or any(token in norm for token in q2_tokens):
+        return "Q2"
+    if norm in {"3", "03"} or any(token in norm for token in q3_tokens):
+        return "Q3"
+    if norm in {"4", "04"} or any(token in norm for token in q4_tokens):
+        return "Q4"
+    return None
+
+
 def combine_summary_clinic_rows_to_township(df: pd.DataFrame) -> pd.DataFrame:
     township_col = find_column_by_token(df, "township")
     clinic_col = find_column_by_token(df, "clinic")
+    period_col = find_column_by_token(df, "period")
 
     working = df.copy()
     if working.empty:
         return working.drop(columns=[clinic_col], errors="ignore")
 
     dimension_cols, numeric_cols = detect_dimension_columns(working)
-    group_cols = [col for col in dimension_cols if col != clinic_col]
+    group_cols = [col for col in dimension_cols if col not in {clinic_col, period_col}]
 
     if township_col is not None and township_col not in group_cols:
         group_cols.append(township_col)
@@ -141,11 +166,43 @@ def combine_summary_clinic_rows_to_township(df: pd.DataFrame) -> pd.DataFrame:
     for col in numeric_cols:
         working[col] = cleaned_numeric(working[col])
 
-    grouped = (
-        working.groupby(group_cols, dropna=False, as_index=False, sort=False)[numeric_cols]
-        .sum(min_count=1)
-        .fillna(0)
-    )
+    def grouped_sum(frame: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+        if not keys:
+            sums = frame[numeric_cols].sum(min_count=1).fillna(0)
+            return pd.DataFrame([sums.to_dict()])
+        return (
+            frame.groupby(keys, dropna=False, as_index=False, sort=False)[numeric_cols]
+            .sum(min_count=1)
+            .fillna(0)
+        )
+
+    if period_col is None:
+        grouped = grouped_sum(working, group_cols)
+        output_columns = [col for col in df.columns if col != clinic_col]
+        return grouped.reindex(columns=output_columns).reset_index(drop=True)
+
+    working["__quarter"] = working[period_col].apply(canonical_quarter_label)
+    quarterly = working.loc[working["__quarter"].notna()].copy()
+
+    if quarterly.empty:
+        output_columns = [col for col in df.columns if col != clinic_col]
+        return working.drop(columns=["__quarter"], errors="ignore").reindex(columns=output_columns).reset_index(drop=True)
+
+    def rollup_period(periods: set[str], output_period: str) -> pd.DataFrame:
+        subset = quarterly.loc[quarterly["__quarter"].isin(periods)]
+        if subset.empty:
+            return pd.DataFrame(columns=group_cols + numeric_cols + [period_col])
+
+        out = grouped_sum(subset, group_cols)
+        out[period_col] = output_period
+        return out
+
+    summary_frames = [
+        rollup_period({"Q1", "Q2"}, "S1"),
+        rollup_period({"Q3", "Q4"}, "S2"),
+        rollup_period({"Q1", "Q2", "Q3", "Q4"}, "Annual"),
+    ]
+    grouped = pd.concat(summary_frames, ignore_index=True)
 
     output_columns = [col for col in df.columns if col != clinic_col]
     return grouped.reindex(columns=output_columns).reset_index(drop=True)
