@@ -122,19 +122,15 @@ def combine_summary_clinic_rows_to_township(df: pd.DataFrame) -> pd.DataFrame:
     township_col = find_column_by_token(df, "township")
     clinic_col = find_column_by_token(df, "clinic")
 
-    if township_col is None:
-        return df
-
     working = df.copy()
-    township_values = working[township_col].astype("string").fillna("").str.strip()
-
-    # Keep only rows that have a township value before rolling clinic rows up.
-    working = working.loc[township_values != ""].reset_index(drop=True)
     if working.empty:
         return working.drop(columns=[clinic_col], errors="ignore")
 
     dimension_cols, numeric_cols = detect_dimension_columns(working)
     group_cols = [col for col in dimension_cols if col != clinic_col]
+
+    if township_col is not None and township_col not in group_cols:
+        group_cols.append(township_col)
 
     if clinic_col is not None:
         working = working.drop(columns=[clinic_col])
