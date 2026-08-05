@@ -9,7 +9,8 @@ import pandas as pd
 
 
 TARGET_SHEETS: dict[str, list[str]] = {
-    "Summary": ["Summary", "summary", "indicators", "indicator"],
+    "Summary": ["Summary", "summary"],
+    "indicators": ["indicators", "indicator"],
     "Td_ALOD": ["Td_ALOD", "Td ALOD", "Td_alod", "TD_ALOD"],
     "ALOD_cummu": ["ALOD_cummu", "ALOD cummu"],
     "IDP": ["IDP", "idp"],
@@ -336,6 +337,10 @@ def combine_sheet(chdn_path: Path, kna_path: Path, canonical_sheet: str, aliases
     return append_karenni_total_rows(combined)
 
 
+def write_sheet_with_aliases(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame) -> None:
+    df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+
 def parse_args() -> argparse.Namespace:
     base_dir = Path(__file__).resolve().parent
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -391,7 +396,7 @@ def main() -> None:
     try:
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
             for sheet_name, df in sheet_map.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
+                write_sheet_with_aliases(writer, sheet_name, df)
     except PermissionError as exc:
         raise PermissionError(
             "Cannot write output file. Close the workbook in Excel and run again."
