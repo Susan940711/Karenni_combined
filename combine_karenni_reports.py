@@ -260,6 +260,89 @@ def build_semester_metric_frame(source_df: pd.DataFrame) -> pd.DataFrame:
     return working
 
 
+def build_alod_override_metric_frame(source_df: pd.DataFrame) -> pd.DataFrame:
+    if source_df.empty:
+        return source_df.copy()
+
+    def period_metric_columns(
+        period_prefix: str,
+        required_tokens: list[str],
+        banned_tokens: list[str] | None = None,
+    ) -> list[str]:
+        banned_tokens = banned_tokens or []
+        period_tokens = [period_prefix]
+
+        matches: list[str] = []
+        for col in source_df.columns:
+            norm = normalize_name(col)
+            if not any(token in norm for token in period_tokens):
+                continue
+            if any(token not in norm for token in required_tokens):
+                continue
+            if any(bad in norm for bad in banned_tokens):
+                continue
+            matches.append(col)
+        return matches
+
+    p_cols: dict[str, dict[str, list[str]]] = {}
+    for prefix in ["S1", "S2", "Annual"]:
+        p_cols[prefix] = {
+            "target": period_metric_columns(prefix, ["target"]),
+            "u1_male": period_metric_columns(prefix, ["u1", "male"], banned_tokens=["female"]),
+            "u1_female": period_metric_columns(prefix, ["u1", "female"]),
+            "one5_male": period_metric_columns(prefix, ["15", "male"], banned_tokens=["female"]),
+            "one5_female": period_metric_columns(prefix, ["15", "female"]),
+            "total": period_metric_columns(prefix, ["total"], banned_tokens=["subtotal", "grandtotal"]),
+        }
+
+    period_value_cols = list(
+        dict.fromkeys(
+            col
+            for prefix in ["S1", "S2", "Annual"]
+            for cols in p_cols[prefix].values()
+            for col in cols
+        )
+    )
+
+    working = source_df.copy()
+    for col in period_value_cols:
+        working[col] = cleaned_numeric(working[col])
+
+    def row_sum(frame: pd.DataFrame, names: list[str]) -> pd.Series:
+        present = [name for name in names if name in frame.columns]
+        if not present:
+            return pd.Series(0, index=frame.index, dtype="float64")
+        return frame[present].sum(axis=1, min_count=1).fillna(0)
+
+    working["S1 Target"] = row_sum(working, p_cols["S1"]["target"])
+    working["S1 Male"] = row_sum(working, p_cols["S1"]["u1_male"] + p_cols["S1"]["one5_male"])
+    working["S1 Female"] = row_sum(working, p_cols["S1"]["u1_female"] + p_cols["S1"]["one5_female"])
+    s1_total_cols = p_cols["S1"]["total"]
+    working["S1 Total"] = row_sum(working, s1_total_cols) if s1_total_cols else working["S1 Male"] + working["S1 Female"]
+
+    working["S2 Target"] = row_sum(working, p_cols["S2"]["target"])
+    working["S2 Male"] = row_sum(working, p_cols["S2"]["u1_male"] + p_cols["S2"]["one5_male"])
+    working["S2 Female"] = row_sum(working, p_cols["S2"]["u1_female"] + p_cols["S2"]["one5_female"])
+    s2_total_cols = p_cols["S2"]["total"]
+    working["S2 Total"] = row_sum(working, s2_total_cols) if s2_total_cols else working["S2 Male"] + working["S2 Female"]
+
+    working["Annual Target"] = row_sum(working, p_cols["Annual"]["target"])
+    working["Annual Male"] = row_sum(working, p_cols["Annual"]["u1_male"] + p_cols["Annual"]["one5_male"])
+    working["Annual Female"] = row_sum(working, p_cols["Annual"]["u1_female"] + p_cols["Annual"]["one5_female"])
+    annual_total_cols = p_cols["Annual"]["total"]
+    working["Annual Total"] = row_sum(working, annual_total_cols) if annual_total_cols else working["Annual Male"] + working["Annual Female"]
+
+    metric_cols = [
+        "S1 Target", "S1 Male", "S1 Female", "S1 Total",
+        "S2 Target", "S2 Male", "S2 Female", "S2 Total",
+        "Annual Target", "Annual Male", "Annual Female", "Annual Total",
+    ]
+    for label in metric_cols:
+        working[label] = working[label].fillna(0)
+
+    return working
+
+
 def combine_summary_clinic_rows_to_township(df: pd.DataFrame) -> pd.DataFrame:
     township_col = find_column_by_token(df, "township")
     clinic_col = find_column_by_token(df, "clinic")
@@ -469,7 +552,7 @@ def build_semester_report_from_indicators(
     semester_df = metric_frame.reindex(columns=output_columns + metric_columns).copy()
 
     if alod_cummu_df is not None and not alod_cummu_df.empty:
-        alod_frame = build_semester_metric_frame(alod_cummu_df)
+        alod_frame = build_alod_override_metric_frame(alod_cummu_df)
         alod_indicator_col = next((c for c in alod_frame.columns if normalize_name(c) == "indicator"), None)
         semester_indicator_col = next((c for c in semester_df.columns if normalize_name(c) == "indicator"), None)
 
@@ -496,6 +579,13 @@ def build_semester_report_from_indicators(
                                 semester_df.loc[semester_target_mask, metric_col]
                             )
                             semester_df.drop(columns=[override_col], inplace=True)
+
+                # Fallback: if ALOD has a single matching row, copy its semester metrics directly.
+                if len(alod_target) == 1 and semester_target_mask.any():
+                    direct_values = alod_target.iloc[0][metric_columns]
+                    for metric_col in metric_columns:
+                        if metric_col in direct_values:
+                            semester_df.loc[semester_target_mask, metric_col] = direct_values[metric_col]
 
     return semester_df.reset_index(drop=True)
 
