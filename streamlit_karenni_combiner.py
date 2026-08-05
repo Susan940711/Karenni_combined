@@ -26,7 +26,10 @@ def build_combined_workbook(chdn_path: Path, kna_path: Path) -> tuple[bytes, dic
         sheet_map[canonical] = combine_sheet(chdn_path, kna_path, canonical, aliases)
 
     if "indicators" in sheet_map:
-        sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_indicators(sheet_map["indicators"])
+        sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_indicators(
+            sheet_map["indicators"],
+            sheet_map.get("ALOD_cummu"),
+        )
 
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
