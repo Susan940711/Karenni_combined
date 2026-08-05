@@ -130,6 +130,28 @@ def find_metric_column(df: pd.DataFrame, tokens: list[str], banned_tokens: list[
     return None
 
 
+def find_metric_columns(
+    df: pd.DataFrame,
+    required_tokens: list[str],
+    any_tokens: list[str] | None = None,
+    banned_tokens: list[str] | None = None,
+) -> list[str]:
+    any_tokens = any_tokens or []
+    banned_tokens = banned_tokens or []
+
+    matched: list[str] = []
+    for col in df.columns:
+        norm = normalize_name(col)
+        if any(bad in norm for bad in banned_tokens):
+            continue
+        if not all(token in norm for token in required_tokens):
+            continue
+        if any_tokens and not any(token in norm for token in any_tokens):
+            continue
+        matched.append(col)
+    return matched
+
+
 def canonical_quarter_label(value: object) -> str | None:
     if is_empty_value(value):
         return None
@@ -342,25 +364,69 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
     if period_col is None:
         raise KeyError("Period column not found in indicators sheet.")
 
-    dimension_cols, numeric_cols = detect_dimension_columns(indicators_df)
+    dimension_cols, _ = detect_dimension_columns(indicators_df)
     group_cols = [col for col in dimension_cols if col != period_col]
 
     target_col = find_metric_column(indicators_df, ["target"])
-    male_col = find_metric_column(indicators_df, ["male"], banned_tokens=["female"])
-    female_col = find_metric_column(indicators_df, ["female"])
     total_col = find_metric_column(indicators_df, ["total"], banned_tokens=["subtotal", "grandtotal"])
 
-    metric_map = {
-        "Target": target_col,
-        "Male": male_col,
-        "Female": female_col,
-        "Total": total_col,
-    }
-    value_cols = [col for col in metric_map.values() if col is not None and col in numeric_cols]
+    male_u1_cols = find_metric_columns(
+        indicators_df,
+        required_tokens=["male"],
+        any_tokens=["u1", "under1", "underone", "lt1", "lessthan1", "011month", "0to11"],
+        banned_tokens=["female"],
+    )
+    male_15_cols = find_metric_columns(
+        indicators_df,
+        required_tokens=["male"],
+        any_tokens=["15", "1to5", "onetofive", "12to59"],
+        banned_tokens=["female"],
+    )
+    female_u1_cols = find_metric_columns(
+        indicators_df,
+        required_tokens=["female"],
+        any_tokens=["u1", "under1", "underone", "lt1", "lessthan1", "011month", "0to11"],
+    )
+    female_15_cols = find_metric_columns(
+        indicators_df,
+        required_tokens=["female"],
+        any_tokens=["15", "1to5", "onetofive", "12to59"],
+    )
+
+    fallback_male_col = find_metric_column(indicators_df, ["male"], banned_tokens=["female"])
+    fallback_female_col = find_metric_column(indicators_df, ["female"])
+
+    value_cols = ["__metric_target", "__metric_male", "__metric_female", "__metric_total"]
 
     working = indicators_df.copy()
-    for col in value_cols:
-        working[col] = cleaned_numeric(working[col])
+
+    if target_col is not None:
+        working["__metric_target"] = cleaned_numeric(working[target_col])
+    else:
+        working["__metric_target"] = pd.NA
+
+    if male_u1_cols or male_15_cols:
+        male_components = list(dict.fromkeys(male_u1_cols + male_15_cols))
+        male_matrix = pd.concat([cleaned_numeric(working[col]) for col in male_components], axis=1)
+        working["__metric_male"] = male_matrix.sum(axis=1, min_count=1)
+    elif fallback_male_col is not None:
+        working["__metric_male"] = cleaned_numeric(working[fallback_male_col])
+    else:
+        working["__metric_male"] = pd.NA
+
+    if female_u1_cols or female_15_cols:
+        female_components = list(dict.fromkeys(female_u1_cols + female_15_cols))
+        female_matrix = pd.concat([cleaned_numeric(working[col]) for col in female_components], axis=1)
+        working["__metric_female"] = female_matrix.sum(axis=1, min_count=1)
+    elif fallback_female_col is not None:
+        working["__metric_female"] = cleaned_numeric(working[fallback_female_col])
+    else:
+        working["__metric_female"] = pd.NA
+
+    if total_col is not None:
+        working["__metric_total"] = cleaned_numeric(working[total_col])
+    else:
+        working["__metric_total"] = working[["__metric_male", "__metric_female"]].sum(axis=1, min_count=1)
 
     working["__quarter"] = working[period_col].apply(canonical_quarter_label)
     quarterly = working.loc[working["__quarter"].notna()].copy()
@@ -381,14 +447,12 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
         subset = quarterly.loc[quarterly["__quarter"].isin(periods)]
         aggregated = aggregate_by_keys(subset, group_cols, value_cols)
         rename_map = {
-            metric_map["Target"]: f"{prefix} Target",
-            metric_map["Male"]: f"{prefix} Male",
-            metric_map["Female"]: f"{prefix} Female",
-            metric_map["Total"]: f"{prefix} Total",
+            "__metric_target": f"{prefix} Target",
+            "__metric_male": f"{prefix} Male",
+            "__metric_female": f"{prefix} Female",
+            "__metric_total": f"{prefix} Total",
         }
-        rename_map = {k: v for k, v in rename_map.items() if k is not None and k in aggregated.columns}
-        aggregated = aggregated.rename(columns=rename_map)
-        return aggregated
+        return aggregated.rename(columns=rename_map)
 
     s1 = period_rollup({"Q1", "Q2"}, "S1")
     s2 = period_rollup({"Q3", "Q4"}, "S2")
