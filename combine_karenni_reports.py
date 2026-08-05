@@ -620,6 +620,14 @@ def build_semester_report_from_indicators(
     return semester_df.reset_index(drop=True)
 
 
+def build_semester_report_from_sheet_map(sheet_map: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Build the semester sheet from the already combined output sheet data."""
+    return build_semester_report_from_indicators(
+        sheet_map["indicators"],
+        sheet_map.get("ALOD_cummu"),
+    )
+
+
 def read_target_sheet(path: Path, canonical_sheet: str, aliases: list[str]) -> pd.DataFrame:
     workbook = pd.ExcelFile(path)
     sheet_name = resolve_sheet_name(workbook, aliases)
@@ -700,10 +708,7 @@ def main() -> None:
         for canonical, aliases in TARGET_SHEETS.items():
             sheet_map[canonical] = combine_sheet(chdn_path, kna_path, canonical, aliases)
         if "indicators" in sheet_map:
-            sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_indicators(
-                sheet_map["indicators"],
-                sheet_map.get("ALOD_cummu"),
-            )
+            sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_sheet_map(sheet_map)
     except PermissionError as exc:
         raise PermissionError(
             "Cannot read one or more source workbooks. Close CHDN/KNA files in Excel and run again."
