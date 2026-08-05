@@ -118,7 +118,7 @@ def find_column_by_token(df: pd.DataFrame, token: str) -> str | None:
     return None
 
 
-def filter_summary_township_rows(df: pd.DataFrame) -> pd.DataFrame:
+def combine_summary_clinic_rows_to_township(df: pd.DataFrame) -> pd.DataFrame:
     township_col = find_column_by_token(df, "township")
     clinic_col = find_column_by_token(df, "clinic")
 
@@ -128,15 +128,31 @@ def filter_summary_township_rows(df: pd.DataFrame) -> pd.DataFrame:
     working = df.copy()
     township_values = working[township_col].astype("string").fillna("").str.strip()
 
-    # Keep only rows that have a township value.
-    mask = township_values != ""
+    # Keep only rows that have a township value before rolling clinic rows up.
+    working = working.loc[township_values != ""].reset_index(drop=True)
+    if working.empty:
+        return working.drop(columns=[clinic_col], errors="ignore")
 
-    # Exclude clinic-level rows (clinic name/code is present).
+    dimension_cols, numeric_cols = detect_dimension_columns(working)
+    group_cols = [col for col in dimension_cols if col != clinic_col]
+
     if clinic_col is not None:
-        clinic_values = working[clinic_col].astype("string").fillna("").str.strip()
-        mask = mask & (clinic_values == "")
+        working = working.drop(columns=[clinic_col])
 
-    return working.loc[mask].reset_index(drop=True)
+    if not numeric_cols:
+        return working.reindex(columns=[col for col in df.columns if col != clinic_col]).reset_index(drop=True)
+
+    for col in numeric_cols:
+        working[col] = cleaned_numeric(working[col])
+
+    grouped = (
+        working.groupby(group_cols, dropna=False, as_index=False, sort=False)[numeric_cols]
+        .sum(min_count=1)
+        .fillna(0)
+    )
+
+    output_columns = [col for col in df.columns if col != clinic_col]
+    return grouped.reindex(columns=output_columns).reset_index(drop=True)
 
 
 def detect_dimension_columns(df: pd.DataFrame) -> tuple[list[str], list[str]]:
@@ -237,7 +253,7 @@ def combine_sheet(chdn_path: Path, kna_path: Path, canonical_sheet: str, aliases
 
     # Summary sheet should include only township-level rows and no appended totals.
     if canonical_sheet == "Summary":
-        return filter_summary_township_rows(combined)
+        return combine_summary_clinic_rows_to_township(combined)
 
     return append_karenni_total_rows(combined)
 
