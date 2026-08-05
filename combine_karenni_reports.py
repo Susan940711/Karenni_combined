@@ -829,7 +829,7 @@ def combine_sheet(chdn_path: Path, kna_path: Path, canonical_sheet: str, aliases
     chdn_df = read_target_sheet(chdn_path, canonical_sheet, aliases)
     kna_df = read_target_sheet(kna_path, canonical_sheet, aliases)
 
-    if canonical_sheet == "ALOD_cummu":
+    if canonical_sheet in {"ALOD_cummu", "IDP"}:
         chdn_df = harmonize_alod_cummu_indicator_columns(chdn_df)
         kna_df = harmonize_alod_cummu_indicator_columns(kna_df)
 
