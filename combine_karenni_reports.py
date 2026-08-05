@@ -364,10 +364,15 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
     if period_col is None:
         raise KeyError("Period column not found in indicators sheet.")
 
-    def quarter_metric_column(quarter: int, required_tokens: list[str], banned_tokens: list[str] | None = None) -> str | None:
+    def quarter_metric_columns(
+        quarter: int,
+        required_tokens: list[str],
+        banned_tokens: list[str] | None = None,
+    ) -> list[str]:
         banned_tokens = banned_tokens or []
         quarter_tokens = [f"q{quarter}", f"quarter{quarter}", f"qtr{quarter}"]
 
+        matches: list[str] = []
         for col in indicators_df.columns:
             norm = normalize_name(col)
             if not any(token in norm for token in quarter_tokens):
@@ -376,25 +381,25 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
                 continue
             if any(bad in norm for bad in banned_tokens):
                 continue
-            return col
-        return None
+            matches.append(col)
+        return matches
 
-    q_cols: dict[int, dict[str, str | None]] = {}
+    q_cols: dict[int, dict[str, list[str]]] = {}
     for q in [1, 2, 3, 4]:
         q_cols[q] = {
-            "target": quarter_metric_column(q, ["target"]),
-            "u1_male": quarter_metric_column(q, ["u1", "male"], banned_tokens=["female"]),
-            "u1_female": quarter_metric_column(q, ["u1", "female"]),
-            "one5_male": quarter_metric_column(q, ["15", "male"], banned_tokens=["female"]),
-            "one5_female": quarter_metric_column(q, ["15", "female"]),
-            "total": quarter_metric_column(q, ["total"], banned_tokens=["subtotal", "grandtotal"]),
+            "target": quarter_metric_columns(q, ["target"]),
+            "u1_male": quarter_metric_columns(q, ["u1", "male"], banned_tokens=["female"]),
+            "u1_female": quarter_metric_columns(q, ["u1", "female"]),
+            "one5_male": quarter_metric_columns(q, ["15", "male"], banned_tokens=["female"]),
+            "one5_female": quarter_metric_columns(q, ["15", "female"]),
+            "total": quarter_metric_columns(q, ["total"], banned_tokens=["subtotal", "grandtotal"]),
         }
 
     quarter_value_cols = [
         col
         for q in [1, 2, 3, 4]
-        for col in q_cols[q].values()
-        if col is not None
+        for cols in q_cols[q].values()
+        for col in cols
     ]
     quarter_value_cols = list(dict.fromkeys(quarter_value_cols))
 
@@ -426,40 +431,40 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
 
     aggregated = aggregate_by_keys(working, group_cols, quarter_value_cols)
 
-    def colsum(frame: pd.DataFrame, names: list[str | None]) -> pd.Series:
-        present = [name for name in names if name is not None and name in frame.columns]
+    def colsum(frame: pd.DataFrame, names: list[str]) -> pd.Series:
+        present = [name for name in names if name in frame.columns]
         if not present:
             return pd.Series(0, index=frame.index, dtype="float64")
         return frame[present].sum(axis=1, min_count=1).fillna(0)
 
     merged = aggregated.copy()
 
-    merged["S1 Target"] = colsum(merged, [q_cols[1]["target"], q_cols[2]["target"]])
-    merged["S1 Male"] = colsum(merged, [q_cols[1]["u1_male"], q_cols[1]["one5_male"], q_cols[2]["u1_male"], q_cols[2]["one5_male"]])
-    merged["S1 Female"] = colsum(merged, [q_cols[1]["u1_female"], q_cols[1]["one5_female"], q_cols[2]["u1_female"], q_cols[2]["one5_female"]])
-    s1_total_cols = [q_cols[1]["total"], q_cols[2]["total"]]
+    merged["S1 Target"] = colsum(merged, q_cols[1]["target"] + q_cols[2]["target"])
+    merged["S1 Male"] = colsum(merged, q_cols[1]["u1_male"] + q_cols[1]["one5_male"] + q_cols[2]["u1_male"] + q_cols[2]["one5_male"])
+    merged["S1 Female"] = colsum(merged, q_cols[1]["u1_female"] + q_cols[1]["one5_female"] + q_cols[2]["u1_female"] + q_cols[2]["one5_female"])
+    s1_total_cols = q_cols[1]["total"] + q_cols[2]["total"]
     s1_total_from_quarter_total = colsum(merged, s1_total_cols)
-    if any(col is not None for col in s1_total_cols):
+    if s1_total_cols:
         merged["S1 Total"] = s1_total_from_quarter_total
     else:
         merged["S1 Total"] = merged["S1 Male"] + merged["S1 Female"]
 
-    merged["S2 Target"] = colsum(merged, [q_cols[3]["target"], q_cols[4]["target"]])
-    merged["S2 Male"] = colsum(merged, [q_cols[3]["u1_male"], q_cols[3]["one5_male"], q_cols[4]["u1_male"], q_cols[4]["one5_male"]])
-    merged["S2 Female"] = colsum(merged, [q_cols[3]["u1_female"], q_cols[3]["one5_female"], q_cols[4]["u1_female"], q_cols[4]["one5_female"]])
-    s2_total_cols = [q_cols[3]["total"], q_cols[4]["total"]]
+    merged["S2 Target"] = colsum(merged, q_cols[3]["target"] + q_cols[4]["target"])
+    merged["S2 Male"] = colsum(merged, q_cols[3]["u1_male"] + q_cols[3]["one5_male"] + q_cols[4]["u1_male"] + q_cols[4]["one5_male"])
+    merged["S2 Female"] = colsum(merged, q_cols[3]["u1_female"] + q_cols[3]["one5_female"] + q_cols[4]["u1_female"] + q_cols[4]["one5_female"])
+    s2_total_cols = q_cols[3]["total"] + q_cols[4]["total"]
     s2_total_from_quarter_total = colsum(merged, s2_total_cols)
-    if any(col is not None for col in s2_total_cols):
+    if s2_total_cols:
         merged["S2 Total"] = s2_total_from_quarter_total
     else:
         merged["S2 Total"] = merged["S2 Male"] + merged["S2 Female"]
 
-    merged["Annual Target"] = colsum(merged, [q_cols[1]["target"], q_cols[2]["target"], q_cols[3]["target"], q_cols[4]["target"]])
-    merged["Annual Male"] = colsum(merged, [q_cols[1]["u1_male"], q_cols[1]["one5_male"], q_cols[2]["u1_male"], q_cols[2]["one5_male"], q_cols[3]["u1_male"], q_cols[3]["one5_male"], q_cols[4]["u1_male"], q_cols[4]["one5_male"]])
-    merged["Annual Female"] = colsum(merged, [q_cols[1]["u1_female"], q_cols[1]["one5_female"], q_cols[2]["u1_female"], q_cols[2]["one5_female"], q_cols[3]["u1_female"], q_cols[3]["one5_female"], q_cols[4]["u1_female"], q_cols[4]["one5_female"]])
-    annual_total_cols = [q_cols[1]["total"], q_cols[2]["total"], q_cols[3]["total"], q_cols[4]["total"]]
+    merged["Annual Target"] = colsum(merged, q_cols[1]["target"] + q_cols[2]["target"] + q_cols[3]["target"] + q_cols[4]["target"])
+    merged["Annual Male"] = colsum(merged, q_cols[1]["u1_male"] + q_cols[1]["one5_male"] + q_cols[2]["u1_male"] + q_cols[2]["one5_male"] + q_cols[3]["u1_male"] + q_cols[3]["one5_male"] + q_cols[4]["u1_male"] + q_cols[4]["one5_male"])
+    merged["Annual Female"] = colsum(merged, q_cols[1]["u1_female"] + q_cols[1]["one5_female"] + q_cols[2]["u1_female"] + q_cols[2]["one5_female"] + q_cols[3]["u1_female"] + q_cols[3]["one5_female"] + q_cols[4]["u1_female"] + q_cols[4]["one5_female"])
+    annual_total_cols = q_cols[1]["total"] + q_cols[2]["total"] + q_cols[3]["total"] + q_cols[4]["total"]
     annual_total_from_quarter_total = colsum(merged, annual_total_cols)
-    if any(col is not None for col in annual_total_cols):
+    if annual_total_cols:
         merged["Annual Total"] = annual_total_from_quarter_total
     else:
         merged["Annual Total"] = merged["Annual Male"] + merged["Annual Female"]
