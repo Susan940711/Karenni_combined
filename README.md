@@ -2,12 +2,15 @@
 
 This package combines CHDN and KNA report workbooks for these sheets only:
 - Summary
+- indicators
 - Td_ALOD
 - ALOD_cummu
 - IDP
 - Td2_indicator
 
-For the `Summary` sheet, it combines clinic-level rows into township totals, removes the clinic column, and does not append Karenni Total rows.
+For the `Summary` sheet, it combines clinic-level rows into township totals, converts quarterly periods to S1/S2/Annual, removes the clinic column, and does not append Karenni Total rows.
+
+For `indicators` and other target sheets, it applies the standard combine logic and appends Karenni Total rows.
 
 For other target sheets, it appends new rows in `Organization` as `Karenni Total` by summing reported numeric values from CHDN and KNA.
 
