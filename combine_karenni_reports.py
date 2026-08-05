@@ -19,6 +19,7 @@ TARGET_SHEETS: dict[str, list[str]] = {
 
 SEMESTER_REPORT_SHEET_NAME = "semester report"
 AT_LEAST_ONE_SEMESTER_SHEET_NAME = "AT_LEAST_ONE_semester"
+AGE_SEMESTER_SHEET_NAME = "Age_semester"
 
 
 def normalize_name(value: str) -> str:
@@ -474,6 +475,124 @@ def build_semester_report_from_sheet_map(sheet_map: dict[str, pd.DataFrame]) -> 
     return build_semester_report_from_indicators(sheet_map["indicators"])
 
 
+def build_age_semester_from_indicators(indicators_df: pd.DataFrame) -> pd.DataFrame:
+    if indicators_df.empty:
+        return indicators_df.copy()
+
+    def quarter_metric_columns(
+        quarter: int,
+        required_tokens: list[str],
+        banned_tokens: list[str] | None = None,
+    ) -> list[str]:
+        banned_tokens = banned_tokens or []
+        quarter_tokens = [f"q{quarter}", f"quarter{quarter}", f"qtr{quarter}"]
+
+        matches: list[str] = []
+        for col in indicators_df.columns:
+            norm = normalize_name(col)
+            if not any(token in norm for token in quarter_tokens):
+                continue
+            if any(token not in norm for token in required_tokens):
+                continue
+            if any(bad in norm for bad in banned_tokens):
+                continue
+            matches.append(col)
+        return matches
+
+    q_cols: dict[int, dict[str, list[str]]] = {}
+    for q in [1, 2, 3, 4]:
+        q_cols[q] = {
+            "target": quarter_metric_columns(q, ["target"]),
+            "u1_male": quarter_metric_columns(q, ["u1", "male"], banned_tokens=["female"]),
+            "u1_female": quarter_metric_columns(q, ["u1", "female"]),
+            "one5_male": quarter_metric_columns(q, ["15", "male"], banned_tokens=["female"]),
+            "one5_female": quarter_metric_columns(q, ["15", "female"]),
+            "total": quarter_metric_columns(q, ["total"], banned_tokens=["subtotal", "grandtotal"]),
+        }
+
+    quarter_value_cols = list(
+        dict.fromkeys(
+            col
+            for q in [1, 2, 3, 4]
+            for cols in q_cols[q].values()
+            for col in cols
+        )
+    )
+
+    working = indicators_df.copy()
+    for col in quarter_value_cols:
+        working[col] = cleaned_numeric(working[col])
+
+    def row_sum(frame: pd.DataFrame, names: list[str]) -> pd.Series:
+        present = [name for name in names if name in frame.columns]
+        if not present:
+            return pd.Series(0, index=frame.index, dtype="float64")
+        return frame[present].sum(axis=1, min_count=1).fillna(0)
+
+    period_col = find_column_by_token(working, "period")
+    organization_col = next((c for c in working.columns if normalize_name(c) == "organization"), None)
+    project_col = next((c for c in working.columns if "project" in normalize_name(c)), None)
+    indicator_col = next((c for c in working.columns if normalize_name(c) == "indicator"), None)
+
+    output = pd.DataFrame(index=working.index)
+    output["Period"] = working[period_col] if period_col is not None else ""
+    output["Organization"] = working[organization_col] if organization_col is not None else ""
+    output["Project Name"] = working[project_col] if project_col is not None else ""
+    output["indicator"] = working[indicator_col] if indicator_col is not None else ""
+
+    output["S1 Target"] = row_sum(working, q_cols[1]["target"] + q_cols[2]["target"])
+    output["S1 U1 Male"] = row_sum(working, q_cols[1]["u1_male"] + q_cols[2]["u1_male"])
+    output["S1 U1 Female"] = row_sum(working, q_cols[1]["u1_female"] + q_cols[2]["u1_female"])
+    output["S1 1-5 Male"] = row_sum(working, q_cols[1]["one5_male"] + q_cols[2]["one5_male"])
+    output["S1 1-5 Female"] = row_sum(working, q_cols[1]["one5_female"] + q_cols[2]["one5_female"])
+    s1_total_cols = q_cols[1]["total"] + q_cols[2]["total"]
+    output["S1 Total"] = row_sum(working, s1_total_cols) if s1_total_cols else (
+        output["S1 U1 Male"]
+        + output["S1 U1 Female"]
+        + output["S1 1-5 Male"]
+        + output["S1 1-5 Female"]
+    )
+
+    output["S2 Target"] = row_sum(working, q_cols[3]["target"] + q_cols[4]["target"])
+    output["S2 U1 Male"] = row_sum(working, q_cols[3]["u1_male"] + q_cols[4]["u1_male"])
+    output["S2 U1 Female"] = row_sum(working, q_cols[3]["u1_female"] + q_cols[4]["u1_female"])
+    output["S2 1-5 Male"] = row_sum(working, q_cols[3]["one5_male"] + q_cols[4]["one5_male"])
+    output["S2 1-5 Female"] = row_sum(working, q_cols[3]["one5_female"] + q_cols[4]["one5_female"])
+    s2_total_cols = q_cols[3]["total"] + q_cols[4]["total"]
+    output["S2 Total"] = row_sum(working, s2_total_cols) if s2_total_cols else (
+        output["S2 U1 Male"]
+        + output["S2 U1 Female"]
+        + output["S2 1-5 Male"]
+        + output["S2 1-5 Female"]
+    )
+
+    output["Annual Target"] = row_sum(working, q_cols[1]["target"] + q_cols[2]["target"] + q_cols[3]["target"] + q_cols[4]["target"])
+    output["Annual U1 Male"] = row_sum(working, q_cols[1]["u1_male"] + q_cols[2]["u1_male"] + q_cols[3]["u1_male"] + q_cols[4]["u1_male"])
+    output["Annual U1 Female"] = row_sum(working, q_cols[1]["u1_female"] + q_cols[2]["u1_female"] + q_cols[3]["u1_female"] + q_cols[4]["u1_female"])
+    output["Annual 1-5 Male"] = row_sum(working, q_cols[1]["one5_male"] + q_cols[2]["one5_male"] + q_cols[3]["one5_male"] + q_cols[4]["one5_male"])
+    output["Annual 1-5 Female"] = row_sum(working, q_cols[1]["one5_female"] + q_cols[2]["one5_female"] + q_cols[3]["one5_female"] + q_cols[4]["one5_female"])
+    annual_total_cols = q_cols[1]["total"] + q_cols[2]["total"] + q_cols[3]["total"] + q_cols[4]["total"]
+    output["Annual Total"] = row_sum(working, annual_total_cols) if annual_total_cols else (
+        output["Annual U1 Male"]
+        + output["Annual U1 Female"]
+        + output["Annual 1-5 Male"]
+        + output["Annual 1-5 Female"]
+    )
+
+    metric_cols = [
+        "S1 Target", "S1 U1 Male", "S1 U1 Female", "S1 1-5 Male", "S1 1-5 Female", "S1 Total",
+        "S2 Target", "S2 U1 Male", "S2 U1 Female", "S2 1-5 Male", "S2 1-5 Female", "S2 Total",
+        "Annual Target", "Annual U1 Male", "Annual U1 Female", "Annual 1-5 Male", "Annual 1-5 Female", "Annual Total",
+    ]
+    output[metric_cols] = output[metric_cols].fillna(0)
+
+    return output.reset_index(drop=True)
+
+
+def build_age_semester_from_sheet_map(sheet_map: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    return build_age_semester_from_indicators(sheet_map["indicators"])
+
+
 def build_at_least_one_semester_from_alod(alod_df: pd.DataFrame) -> pd.DataFrame:
     if alod_df.empty:
         return alod_df.copy()
@@ -651,6 +770,7 @@ def main() -> None:
             sheet_map[canonical] = combine_sheet(chdn_path, kna_path, canonical, aliases)
         if "indicators" in sheet_map:
             sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_sheet_map(sheet_map)
+            sheet_map[AGE_SEMESTER_SHEET_NAME] = build_age_semester_from_sheet_map(sheet_map)
         if "ALOD_cummu" in sheet_map:
             sheet_map[AT_LEAST_ONE_SEMESTER_SHEET_NAME] = build_at_least_one_semester_from_alod(sheet_map["ALOD_cummu"])
     except PermissionError as exc:
