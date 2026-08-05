@@ -364,104 +364,105 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
     if period_col is None:
         raise KeyError("Period column not found in indicators sheet.")
 
+    def quarter_metric_column(quarter: int, required_tokens: list[str], banned_tokens: list[str] | None = None) -> str | None:
+        banned_tokens = banned_tokens or []
+        quarter_tokens = [f"q{quarter}", f"quarter{quarter}", f"qtr{quarter}"]
+
+        for col in indicators_df.columns:
+            norm = normalize_name(col)
+            if not any(token in norm for token in quarter_tokens):
+                continue
+            if any(token not in norm for token in required_tokens):
+                continue
+            if any(bad in norm for bad in banned_tokens):
+                continue
+            return col
+        return None
+
+    q_cols: dict[int, dict[str, str | None]] = {}
+    for q in [1, 2, 3, 4]:
+        q_cols[q] = {
+            "target": quarter_metric_column(q, ["target"]),
+            "u1_male": quarter_metric_column(q, ["u1", "male"], banned_tokens=["female"]),
+            "u1_female": quarter_metric_column(q, ["u1", "female"]),
+            "one5_male": quarter_metric_column(q, ["15", "male"], banned_tokens=["female"]),
+            "one5_female": quarter_metric_column(q, ["15", "female"]),
+            "total": quarter_metric_column(q, ["total"], banned_tokens=["subtotal", "grandtotal"]),
+        }
+
+    quarter_value_cols = [
+        col
+        for q in [1, 2, 3, 4]
+        for col in q_cols[q].values()
+        if col is not None
+    ]
+    quarter_value_cols = list(dict.fromkeys(quarter_value_cols))
+
     dimension_cols, _ = detect_dimension_columns(indicators_df)
+    organization_col = next((c for c in indicators_df.columns if normalize_name(c) == "organization"), None)
     group_cols = [col for col in dimension_cols if col != period_col]
+    if organization_col is not None and organization_col in indicators_df.columns and organization_col not in group_cols:
+        group_cols.append(organization_col)
 
-    target_col = find_metric_column(indicators_df, ["target"])
-    total_col = find_metric_column(indicators_df, ["total"], banned_tokens=["subtotal", "grandtotal"])
-
-    male_u1_cols = find_metric_columns(
-        indicators_df,
-        required_tokens=["male"],
-        any_tokens=["u1", "under1", "underone", "lt1", "lessthan1", "011month", "0to11"],
-        banned_tokens=["female"],
-    )
-    male_15_cols = find_metric_columns(
-        indicators_df,
-        required_tokens=["male"],
-        any_tokens=["15", "1to5", "onetofive", "12to59"],
-        banned_tokens=["female"],
-    )
-    female_u1_cols = find_metric_columns(
-        indicators_df,
-        required_tokens=["female"],
-        any_tokens=["u1", "under1", "underone", "lt1", "lessthan1", "011month", "0to11"],
-    )
-    female_15_cols = find_metric_columns(
-        indicators_df,
-        required_tokens=["female"],
-        any_tokens=["15", "1to5", "onetofive", "12to59"],
-    )
-
-    fallback_male_col = find_metric_column(indicators_df, ["male"], banned_tokens=["female"])
-    fallback_female_col = find_metric_column(indicators_df, ["female"])
-
-    value_cols = ["__metric_target", "__metric_male", "__metric_female", "__metric_total"]
-
-    working = indicators_df.copy()
-
-    if target_col is not None:
-        working["__metric_target"] = cleaned_numeric(working[target_col])
-    else:
-        working["__metric_target"] = pd.NA
-
-    if male_u1_cols or male_15_cols:
-        male_components = list(dict.fromkeys(male_u1_cols + male_15_cols))
-        male_matrix = pd.concat([cleaned_numeric(working[col]) for col in male_components], axis=1)
-        working["__metric_male"] = male_matrix.sum(axis=1, min_count=1)
-    elif fallback_male_col is not None:
-        working["__metric_male"] = cleaned_numeric(working[fallback_male_col])
-    else:
-        working["__metric_male"] = pd.NA
-
-    if female_u1_cols or female_15_cols:
-        female_components = list(dict.fromkeys(female_u1_cols + female_15_cols))
-        female_matrix = pd.concat([cleaned_numeric(working[col]) for col in female_components], axis=1)
-        working["__metric_female"] = female_matrix.sum(axis=1, min_count=1)
-    elif fallback_female_col is not None:
-        working["__metric_female"] = cleaned_numeric(working[fallback_female_col])
-    else:
-        working["__metric_female"] = pd.NA
-
-    if total_col is not None:
-        working["__metric_total"] = cleaned_numeric(working[total_col])
-    else:
-        working["__metric_total"] = working[["__metric_male", "__metric_female"]].sum(axis=1, min_count=1)
-
-    working["__quarter"] = working[period_col].apply(canonical_quarter_label)
-    quarterly = working.loc[working["__quarter"].notna()].copy()
-
-    if quarterly.empty:
-        base_cols = [col for col in [period_col, *group_cols] if col in indicators_df.columns]
-        output = working.drop(columns=["__quarter"], errors="ignore").reindex(columns=base_cols).drop_duplicates()
-        output[period_col] = "Semester"
+    if not quarter_value_cols:
+        base = indicators_df[group_cols].drop_duplicates() if group_cols else pd.DataFrame([{}])
+        base[period_col] = "Semester"
         for label in [
             "S1 Target", "S1 Male", "S1 Female", "S1 Total",
             "S2 Target", "S2 Male", "S2 Female", "S2 Total",
             "Annual Target", "Annual Male", "Annual Female", "Annual Total",
         ]:
-            output[label] = 0
-        return output.reset_index(drop=True)
+            base[label] = 0
+        output_columns = [period_col, *[c for c in dimension_cols if c != period_col]]
+        return base.reindex(columns=output_columns + [
+            "S1 Target", "S1 Male", "S1 Female", "S1 Total",
+            "S2 Target", "S2 Male", "S2 Female", "S2 Total",
+            "Annual Target", "Annual Male", "Annual Female", "Annual Total",
+        ]).reset_index(drop=True)
 
-    def period_rollup(periods: set[str], prefix: str) -> pd.DataFrame:
-        subset = quarterly.loc[quarterly["__quarter"].isin(periods)]
-        aggregated = aggregate_by_keys(subset, group_cols, value_cols)
-        rename_map = {
-            "__metric_target": f"{prefix} Target",
-            "__metric_male": f"{prefix} Male",
-            "__metric_female": f"{prefix} Female",
-            "__metric_total": f"{prefix} Total",
-        }
-        return aggregated.rename(columns=rename_map)
+    working = indicators_df.copy()
+    for col in quarter_value_cols:
+        working[col] = cleaned_numeric(working[col])
 
-    s1 = period_rollup({"Q1", "Q2"}, "S1")
-    s2 = period_rollup({"Q3", "Q4"}, "S2")
-    annual = period_rollup({"Q1", "Q2", "Q3", "Q4"}, "Annual")
+    aggregated = aggregate_by_keys(working, group_cols, quarter_value_cols)
 
-    base = quarterly[group_cols].drop_duplicates() if group_cols else pd.DataFrame([{}])
-    merged = base.merge(s1, on=group_cols, how="left") if group_cols else s1.copy()
-    merged = merged.merge(s2, on=group_cols, how="left") if group_cols else merged.join(s2, rsuffix="_s2")
-    merged = merged.merge(annual, on=group_cols, how="left") if group_cols else merged.join(annual, rsuffix="_annual")
+    def colsum(frame: pd.DataFrame, names: list[str | None]) -> pd.Series:
+        present = [name for name in names if name is not None and name in frame.columns]
+        if not present:
+            return pd.Series(0, index=frame.index, dtype="float64")
+        return frame[present].sum(axis=1, min_count=1).fillna(0)
+
+    merged = aggregated.copy()
+
+    merged["S1 Target"] = colsum(merged, [q_cols[1]["target"], q_cols[2]["target"]])
+    merged["S1 Male"] = colsum(merged, [q_cols[1]["u1_male"], q_cols[1]["one5_male"], q_cols[2]["u1_male"], q_cols[2]["one5_male"]])
+    merged["S1 Female"] = colsum(merged, [q_cols[1]["u1_female"], q_cols[1]["one5_female"], q_cols[2]["u1_female"], q_cols[2]["one5_female"]])
+    s1_total_cols = [q_cols[1]["total"], q_cols[2]["total"]]
+    s1_total_from_quarter_total = colsum(merged, s1_total_cols)
+    if any(col is not None for col in s1_total_cols):
+        merged["S1 Total"] = s1_total_from_quarter_total
+    else:
+        merged["S1 Total"] = merged["S1 Male"] + merged["S1 Female"]
+
+    merged["S2 Target"] = colsum(merged, [q_cols[3]["target"], q_cols[4]["target"]])
+    merged["S2 Male"] = colsum(merged, [q_cols[3]["u1_male"], q_cols[3]["one5_male"], q_cols[4]["u1_male"], q_cols[4]["one5_male"]])
+    merged["S2 Female"] = colsum(merged, [q_cols[3]["u1_female"], q_cols[3]["one5_female"], q_cols[4]["u1_female"], q_cols[4]["one5_female"]])
+    s2_total_cols = [q_cols[3]["total"], q_cols[4]["total"]]
+    s2_total_from_quarter_total = colsum(merged, s2_total_cols)
+    if any(col is not None for col in s2_total_cols):
+        merged["S2 Total"] = s2_total_from_quarter_total
+    else:
+        merged["S2 Total"] = merged["S2 Male"] + merged["S2 Female"]
+
+    merged["Annual Target"] = colsum(merged, [q_cols[1]["target"], q_cols[2]["target"], q_cols[3]["target"], q_cols[4]["target"]])
+    merged["Annual Male"] = colsum(merged, [q_cols[1]["u1_male"], q_cols[1]["one5_male"], q_cols[2]["u1_male"], q_cols[2]["one5_male"], q_cols[3]["u1_male"], q_cols[3]["one5_male"], q_cols[4]["u1_male"], q_cols[4]["one5_male"]])
+    merged["Annual Female"] = colsum(merged, [q_cols[1]["u1_female"], q_cols[1]["one5_female"], q_cols[2]["u1_female"], q_cols[2]["one5_female"], q_cols[3]["u1_female"], q_cols[3]["one5_female"], q_cols[4]["u1_female"], q_cols[4]["one5_female"]])
+    annual_total_cols = [q_cols[1]["total"], q_cols[2]["total"], q_cols[3]["total"], q_cols[4]["total"]]
+    annual_total_from_quarter_total = colsum(merged, annual_total_cols)
+    if any(col is not None for col in annual_total_cols):
+        merged["Annual Total"] = annual_total_from_quarter_total
+    else:
+        merged["Annual Total"] = merged["Annual Male"] + merged["Annual Female"]
 
     for label in [
         "S1 Target", "S1 Male", "S1 Female", "S1 Total",
@@ -472,9 +473,20 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
             merged[label] = 0
         merged[label] = merged[label].fillna(0)
 
-    merged[period_col] = "Semester"
+    # Keep period value from indicators source (first non-empty value per group).
+    period_source = indicators_df.copy()
+    period_values = period_source[period_col].astype("string").fillna("").str.strip()
+    period_source = period_source.loc[period_values != ""]
 
-    output_columns = [col for col in indicators_df.columns if col in dimension_cols]
+    if group_cols and not period_source.empty:
+        period_lookup = period_source[group_cols + [period_col]].drop_duplicates(subset=group_cols, keep="first")
+        merged = merged.merge(period_lookup, on=group_cols, how="left")
+    elif not period_source.empty:
+        merged[period_col] = period_source[period_col].iloc[0]
+    else:
+        merged[period_col] = ""
+
+    output_columns = [col for col in indicators_df.columns if col in dimension_cols or col == organization_col]
     if period_col not in output_columns:
         output_columns = [period_col, *output_columns]
     output_columns = [col for col in output_columns if col != period_col]
