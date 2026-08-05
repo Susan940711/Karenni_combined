@@ -8,7 +8,13 @@ import tempfile
 import pandas as pd
 import streamlit as st
 
-from combine_karenni_reports import TARGET_SHEETS, combine_sheet, write_sheet_with_aliases
+from combine_karenni_reports import (
+    SEMESTER_REPORT_SHEET_NAME,
+    TARGET_SHEETS,
+    build_semester_report_from_indicators,
+    combine_sheet,
+    write_sheet_with_aliases,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -18,6 +24,9 @@ def build_combined_workbook(chdn_path: Path, kna_path: Path) -> tuple[bytes, dic
     sheet_map: dict[str, pd.DataFrame] = {}
     for canonical, aliases in TARGET_SHEETS.items():
         sheet_map[canonical] = combine_sheet(chdn_path, kna_path, canonical, aliases)
+
+    if "indicators" in sheet_map:
+        sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_indicators(sheet_map["indicators"])
 
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -40,7 +49,8 @@ def main() -> None:
     st.title("Karenni Combination Builder")
     st.caption(
         "Combine CHDN and KNA report sheets. Summary uses township rollup with S1/S2/Annual periods; "
-        "indicators and the other sheets use standard combine logic with appended Karenni Total rows."
+        "indicators and the other sheets use standard combine logic with appended Karenni Total rows; "
+        "semester report is built from indicators quarterly values."
     )
 
     with st.expander("Target sheets", expanded=True):
