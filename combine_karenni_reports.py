@@ -594,7 +594,7 @@ def build_age_semester_from_sheet_map(sheet_map: dict[str, pd.DataFrame]) -> pd.
     return build_age_semester_from_indicators(sheet_map["indicators"])
 
 
-def build_idp_semester_from_indicators(indicators_df: pd.DataFrame) -> pd.DataFrame:
+def build_idp_semester_from_indicators(idp_df: pd.DataFrame) -> pd.DataFrame:
     period_key = "Period"
     organization_key = "Organization"
     project_key = "Project Name"
@@ -605,7 +605,7 @@ def build_idp_semester_from_indicators(indicators_df: pd.DataFrame) -> pd.DataFr
         "Annual IDP Male", "Annual IDP Female", "Annual non-IDP Male", "Annual non-IDP Female",
     ]
 
-    if indicators_df.empty:
+    if idp_df.empty:
         return pd.DataFrame(columns=[period_key, organization_key, project_key, indicator_key, *metric_cols])
 
     def quarter_metric_columns(
@@ -617,7 +617,7 @@ def build_idp_semester_from_indicators(indicators_df: pd.DataFrame) -> pd.DataFr
         quarter_tokens = [f"q{quarter}", f"quarter{quarter}", f"qtr{quarter}"]
 
         matches: list[str] = []
-        for col in indicators_df.columns:
+        for col in idp_df.columns:
             norm = normalize_name(col)
             if not any(token in norm for token in quarter_tokens):
                 continue
@@ -646,7 +646,7 @@ def build_idp_semester_from_indicators(indicators_df: pd.DataFrame) -> pd.DataFr
         )
     )
 
-    working = indicators_df.copy()
+    working = idp_df.copy()
     for col in quarter_value_cols:
         working[col] = cleaned_numeric(working[col])
 
@@ -657,7 +657,10 @@ def build_idp_semester_from_indicators(indicators_df: pd.DataFrame) -> pd.DataFr
         return "penta1" in norm or ("penta" in norm and "1" in norm)
 
     if indicator_col is not None:
-        working = working.loc[working[indicator_col].apply(is_penta1)].copy()
+        penta_rows = working.loc[working[indicator_col].apply(is_penta1)].copy()
+        # Fall back to all IDP rows when Penta1 naming differs across source files.
+        if not penta_rows.empty:
+            working = penta_rows
     else:
         working = working.iloc[0:0].copy()
 
@@ -712,7 +715,7 @@ def build_idp_semester_from_indicators(indicators_df: pd.DataFrame) -> pd.DataFr
 
 
 def build_idp_semester_from_sheet_map(sheet_map: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    return build_idp_semester_from_indicators(sheet_map["indicators"])
+    return build_idp_semester_from_indicators(sheet_map["IDP"])
 
 
 def build_at_least_one_semester_from_alod(alod_df: pd.DataFrame) -> pd.DataFrame:
@@ -893,6 +896,7 @@ def main() -> None:
         if "indicators" in sheet_map:
             sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_sheet_map(sheet_map)
             sheet_map[AGE_SEMESTER_SHEET_NAME] = build_age_semester_from_sheet_map(sheet_map)
+        if "IDP" in sheet_map:
             sheet_map[IDP_SEMESTER_SHEET_NAME] = build_idp_semester_from_sheet_map(sheet_map)
         if "ALOD_cummu" in sheet_map:
             sheet_map[AT_LEAST_ONE_SEMESTER_SHEET_NAME] = build_at_least_one_semester_from_alod(sheet_map["ALOD_cummu"])
