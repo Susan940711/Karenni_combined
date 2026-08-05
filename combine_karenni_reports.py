@@ -591,6 +591,27 @@ def build_semester_report_from_indicators(
                     if matching_rows.empty:
                         matching_rows = alod_target.iloc[[0]]
 
+                    if len(matching_rows) > 1:
+                        org_match_col = next((c for c in matching_rows.columns if normalize_name(c) == "organization"), None)
+                        score_series = matching_rows[metric_columns].sum(axis=1, min_count=1).fillna(0)
+                        matching_rows = matching_rows.assign(__score=score_series)
+                        if org_match_col is not None:
+                            matching_rows = matching_rows.sort_values(
+                                by=[org_match_col, "__score"],
+                                ascending=[True, False],
+                                key=lambda s: s.astype(str).str.lower() if s.name == org_match_col else s,
+                            )
+                            karenni_total_rows = matching_rows[
+                                matching_rows[org_match_col].astype("string").fillna("").str.strip().eq("Karenni Total")
+                            ]
+                            if not karenni_total_rows.empty:
+                                matching_rows = karenni_total_rows.sort_values(by="__score", ascending=False)
+                        else:
+                            matching_rows = matching_rows.sort_values(by="__score", ascending=False)
+
+                    if "__score" in matching_rows.columns:
+                        matching_rows = matching_rows.drop(columns=["__score"])
+
                     source_row = matching_rows.iloc[0]
                     for metric_col in metric_columns:
                         if metric_col in source_row:
