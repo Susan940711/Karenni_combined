@@ -146,13 +146,16 @@ def combine_summary_clinic_rows_to_township(df: pd.DataFrame) -> pd.DataFrame:
     township_col = find_column_by_token(df, "township")
     clinic_col = find_column_by_token(df, "clinic")
     period_col = find_column_by_token(df, "period")
+    organization_col = next((c for c in df.columns if normalize_name(c) == "organization"), None)
 
     working = df.copy()
     if working.empty:
         return working.drop(columns=[clinic_col], errors="ignore")
 
     dimension_cols, numeric_cols = detect_dimension_columns(working)
-    group_cols = [col for col in dimension_cols if col not in {clinic_col, period_col}]
+    # Merge CHDN and KNA into one township-period result by excluding organization.
+    excluded_cols = {clinic_col, period_col, organization_col}
+    group_cols = [col for col in dimension_cols if col not in excluded_cols]
 
     if township_col is not None and township_col not in group_cols:
         group_cols.append(township_col)
@@ -178,6 +181,8 @@ def combine_summary_clinic_rows_to_township(df: pd.DataFrame) -> pd.DataFrame:
 
     if period_col is None:
         grouped = grouped_sum(working, group_cols)
+        if organization_col is not None and organization_col in df.columns:
+            grouped[organization_col] = "Karenni Total"
         output_columns = [col for col in df.columns if col != clinic_col]
         return grouped.reindex(columns=output_columns).reset_index(drop=True)
 
@@ -203,6 +208,26 @@ def combine_summary_clinic_rows_to_township(df: pd.DataFrame) -> pd.DataFrame:
         rollup_period({"Q1", "Q2", "Q3", "Q4"}, "Annual"),
     ]
     grouped = pd.concat(summary_frames, ignore_index=True)
+    if organization_col is not None and organization_col in df.columns:
+        grouped[organization_col] = "Karenni Total"
+
+    twp_mimu_col = find_column_by_token(grouped, "twpmimu")
+    year_col = find_column_by_token(grouped, "year")
+    if twp_mimu_col is not None and period_col in grouped.columns:
+        dedupe_keys = [twp_mimu_col, period_col]
+        if year_col is not None and year_col not in dedupe_keys:
+            dedupe_keys.append(year_col)
+
+        numeric_in_grouped = [c for c in numeric_cols if c in grouped.columns]
+        non_numeric_cols = [c for c in grouped.columns if c not in dedupe_keys + numeric_in_grouped]
+
+        agg_map: dict[str, str] = {col: "sum" for col in numeric_in_grouped}
+        for col in non_numeric_cols:
+            agg_map[col] = "first"
+
+        grouped = grouped.groupby(dedupe_keys, dropna=False, as_index=False, sort=False).agg(agg_map)
+        if organization_col is not None and organization_col in grouped.columns:
+            grouped[organization_col] = "Karenni Total"
 
     output_columns = [col for col in df.columns if col != clinic_col]
     return grouped.reindex(columns=output_columns).reset_index(drop=True)
