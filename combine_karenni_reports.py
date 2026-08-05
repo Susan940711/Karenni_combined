@@ -17,6 +17,8 @@ TARGET_SHEETS: dict[str, list[str]] = {
     "Td2_indicator": ["Td2_indicator", "TD2_indicator", "Td2 indicator"],
 }
 
+SEMESTER_REPORT_SHEET_NAME = "semester report"
+
 
 def normalize_name(value: str) -> str:
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
@@ -115,6 +117,15 @@ def cleaned_numeric(series: pd.Series) -> pd.Series:
 def find_column_by_token(df: pd.DataFrame, token: str) -> str | None:
     for col in df.columns:
         if token in normalize_name(col):
+            return col
+    return None
+
+
+def find_metric_column(df: pd.DataFrame, tokens: list[str], banned_tokens: list[str] | None = None) -> str | None:
+    banned_tokens = banned_tokens or []
+    for col in df.columns:
+        norm = normalize_name(col)
+        if any(token in norm for token in tokens) and not any(bad in norm for bad in banned_tokens):
             return col
     return None
 
@@ -308,6 +319,112 @@ def append_karenni_total_rows(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([df, grouped], ignore_index=True)
 
 
+def aggregate_by_keys(df: pd.DataFrame, keys: list[str], value_cols: list[str]) -> pd.DataFrame:
+    if not value_cols:
+        return pd.DataFrame(columns=keys)
+
+    if not keys:
+        sums = df[value_cols].sum(min_count=1).fillna(0)
+        return pd.DataFrame([sums.to_dict()])
+
+    return (
+        df.groupby(keys, dropna=False, as_index=False, sort=False)[value_cols]
+        .sum(min_count=1)
+        .fillna(0)
+    )
+
+
+def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.DataFrame:
+    if indicators_df.empty:
+        return indicators_df.copy()
+
+    period_col = find_column_by_token(indicators_df, "period")
+    if period_col is None:
+        raise KeyError("Period column not found in indicators sheet.")
+
+    dimension_cols, numeric_cols = detect_dimension_columns(indicators_df)
+    group_cols = [col for col in dimension_cols if col != period_col]
+
+    target_col = find_metric_column(indicators_df, ["target"])
+    male_col = find_metric_column(indicators_df, ["male"], banned_tokens=["female"])
+    female_col = find_metric_column(indicators_df, ["female"])
+    total_col = find_metric_column(indicators_df, ["total"], banned_tokens=["subtotal", "grandtotal"])
+
+    metric_map = {
+        "Target": target_col,
+        "Male": male_col,
+        "Female": female_col,
+        "Total": total_col,
+    }
+    value_cols = [col for col in metric_map.values() if col is not None and col in numeric_cols]
+
+    working = indicators_df.copy()
+    for col in value_cols:
+        working[col] = cleaned_numeric(working[col])
+
+    working["__quarter"] = working[period_col].apply(canonical_quarter_label)
+    quarterly = working.loc[working["__quarter"].notna()].copy()
+
+    if quarterly.empty:
+        base_cols = [col for col in [period_col, *group_cols] if col in indicators_df.columns]
+        output = working.drop(columns=["__quarter"], errors="ignore").reindex(columns=base_cols).drop_duplicates()
+        output[period_col] = "Semester"
+        for label in [
+            "S1 Target", "S1 Male", "S1 Female", "S1 Total",
+            "S2 Target", "S2 Male", "S2 Female", "S2 Total",
+            "Annual Target", "Annual Male", "Annual Female", "Annual Total",
+        ]:
+            output[label] = 0
+        return output.reset_index(drop=True)
+
+    def period_rollup(periods: set[str], prefix: str) -> pd.DataFrame:
+        subset = quarterly.loc[quarterly["__quarter"].isin(periods)]
+        aggregated = aggregate_by_keys(subset, group_cols, value_cols)
+        rename_map = {
+            metric_map["Target"]: f"{prefix} Target",
+            metric_map["Male"]: f"{prefix} Male",
+            metric_map["Female"]: f"{prefix} Female",
+            metric_map["Total"]: f"{prefix} Total",
+        }
+        rename_map = {k: v for k, v in rename_map.items() if k is not None and k in aggregated.columns}
+        aggregated = aggregated.rename(columns=rename_map)
+        return aggregated
+
+    s1 = period_rollup({"Q1", "Q2"}, "S1")
+    s2 = period_rollup({"Q3", "Q4"}, "S2")
+    annual = period_rollup({"Q1", "Q2", "Q3", "Q4"}, "Annual")
+
+    base = quarterly[group_cols].drop_duplicates() if group_cols else pd.DataFrame([{}])
+    merged = base.merge(s1, on=group_cols, how="left") if group_cols else s1.copy()
+    merged = merged.merge(s2, on=group_cols, how="left") if group_cols else merged.join(s2, rsuffix="_s2")
+    merged = merged.merge(annual, on=group_cols, how="left") if group_cols else merged.join(annual, rsuffix="_annual")
+
+    for label in [
+        "S1 Target", "S1 Male", "S1 Female", "S1 Total",
+        "S2 Target", "S2 Male", "S2 Female", "S2 Total",
+        "Annual Target", "Annual Male", "Annual Female", "Annual Total",
+    ]:
+        if label not in merged.columns:
+            merged[label] = 0
+        merged[label] = merged[label].fillna(0)
+
+    merged[period_col] = "Semester"
+
+    output_columns = [col for col in indicators_df.columns if col in dimension_cols]
+    if period_col not in output_columns:
+        output_columns = [period_col, *output_columns]
+    output_columns = [col for col in output_columns if col != period_col]
+    output_columns = [period_col, *output_columns]
+
+    metric_columns = [
+        "S1 Target", "S1 Male", "S1 Female", "S1 Total",
+        "S2 Target", "S2 Male", "S2 Female", "S2 Total",
+        "Annual Target", "Annual Male", "Annual Female", "Annual Total",
+    ]
+
+    return merged.reindex(columns=output_columns + metric_columns).reset_index(drop=True)
+
+
 def read_target_sheet(path: Path, canonical_sheet: str, aliases: list[str]) -> pd.DataFrame:
     workbook = pd.ExcelFile(path)
     sheet_name = resolve_sheet_name(workbook, aliases)
@@ -387,6 +504,8 @@ def main() -> None:
     try:
         for canonical, aliases in TARGET_SHEETS.items():
             sheet_map[canonical] = combine_sheet(chdn_path, kna_path, canonical, aliases)
+        if "indicators" in sheet_map:
+            sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_indicators(sheet_map["indicators"])
     except PermissionError as exc:
         raise PermissionError(
             "Cannot read one or more source workbooks. Close CHDN/KNA files in Excel and run again."
