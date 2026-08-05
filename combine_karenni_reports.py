@@ -18,6 +18,7 @@ TARGET_SHEETS: dict[str, list[str]] = {
 }
 
 SEMESTER_REPORT_SHEET_NAME = "semester report"
+AT_LEAST_ONE_SEMESTER_SHEET_NAME = "AT_LEAST_ONE_semester"
 
 
 def normalize_name(value: str) -> str:
@@ -473,6 +474,102 @@ def build_semester_report_from_sheet_map(sheet_map: dict[str, pd.DataFrame]) -> 
     return build_semester_report_from_indicators(sheet_map["indicators"])
 
 
+def build_at_least_one_semester_from_alod(alod_df: pd.DataFrame) -> pd.DataFrame:
+    if alod_df.empty:
+        return alod_df.copy()
+
+    period_col = find_column_by_token(alod_df, "period")
+    organization_col = next((c for c in alod_df.columns if normalize_name(c) == "organization"), None)
+    project_col = next((c for c in alod_df.columns if "project" in normalize_name(c)), None)
+    indicator_col = next((c for c in alod_df.columns if normalize_name(c) == "indicator"), None)
+
+    def prefixed_columns(prefix: str, required_tokens: list[str], banned_tokens: list[str] | None = None) -> list[str]:
+        banned_tokens = banned_tokens or []
+        prefix_token = normalize_name(prefix)
+        matched: list[str] = []
+        for col in alod_df.columns:
+            norm = normalize_name(col)
+            if prefix_token not in norm:
+                continue
+            if any(token not in norm for token in required_tokens):
+                continue
+            if any(bad in norm for bad in banned_tokens):
+                continue
+            matched.append(col)
+        return matched
+
+    def value_sum(frame: pd.DataFrame, names: list[str]) -> pd.Series:
+        present = [name for name in names if name in frame.columns]
+        if not present:
+            return pd.Series(0, index=frame.index, dtype="float64")
+        parsed = [cleaned_numeric(frame[col]) for col in present]
+        return pd.concat(parsed, axis=1).sum(axis=1, min_count=1).fillna(0)
+
+    working = alod_df.copy()
+
+    annual_target_cols = prefixed_columns("Annual", ["target"])
+    annual_u1_male_cols = prefixed_columns("Annual", ["u1", "male"], banned_tokens=["female"])
+    annual_u1_female_cols = prefixed_columns("Annual", ["u1", "female"])
+    annual_15_male_cols = prefixed_columns("Annual", ["15", "male"], banned_tokens=["female"])
+    annual_15_female_cols = prefixed_columns("Annual", ["15", "female"])
+    annual_total_cols = prefixed_columns("Annual", ["total"], banned_tokens=["subtotal", "grandtotal"])
+
+    s1_u1_male_cols = prefixed_columns("S1", ["u1", "male"], banned_tokens=["female"])
+    s1_u1_female_cols = prefixed_columns("S1", ["u1", "female"])
+    s1_15_male_cols = prefixed_columns("S1", ["15", "male"], banned_tokens=["female"])
+    s1_15_female_cols = prefixed_columns("S1", ["15", "female"])
+    s1_total_cols = prefixed_columns("S1", ["total"], banned_tokens=["subtotal", "grandtotal"])
+
+    uq3_u1_male_cols = prefixed_columns("Upto Q3", ["u1", "male"], banned_tokens=["female"])
+    uq3_u1_female_cols = prefixed_columns("Upto Q3", ["u1", "female"])
+    uq3_15_male_cols = prefixed_columns("Upto Q3", ["15", "male"], banned_tokens=["female"])
+    uq3_15_female_cols = prefixed_columns("Upto Q3", ["15", "female"])
+    uq3_total_cols = prefixed_columns("Upto Q3", ["total"], banned_tokens=["subtotal", "grandtotal"])
+
+    s2_u1_male_cols = prefixed_columns("S2", ["u1", "male"], banned_tokens=["female"])
+    s2_u1_female_cols = prefixed_columns("S2", ["u1", "female"])
+    s2_15_male_cols = prefixed_columns("S2", ["15", "male"], banned_tokens=["female"])
+    s2_15_female_cols = prefixed_columns("S2", ["15", "female"])
+    s2_total_cols = prefixed_columns("S2", ["total"], banned_tokens=["subtotal", "grandtotal"])
+
+    output = pd.DataFrame(index=working.index)
+    output["Period"] = working[period_col] if period_col is not None else ""
+    output["Organization"] = working[organization_col] if organization_col is not None else ""
+    output["Project Name"] = working[project_col] if project_col is not None else ""
+    output["Indicator"] = working[indicator_col] if indicator_col is not None else ""
+
+    output["Annual Target"] = value_sum(working, annual_target_cols)
+    output["Annual Male"] = value_sum(working, annual_u1_male_cols + annual_15_male_cols)
+    output["Annaul Female"] = value_sum(working, annual_u1_female_cols + annual_15_female_cols)
+    annual_total = value_sum(working, annual_total_cols)
+    output["Annual Total"] = annual_total.where(annual_total != 0, output["Annual Male"] + output["Annaul Female"])
+
+    output["S1 Male"] = value_sum(working, s1_u1_male_cols + s1_15_male_cols)
+    output["S1 Female"] = value_sum(working, s1_u1_female_cols + s1_15_female_cols)
+    s1_total = value_sum(working, s1_total_cols)
+    output["S1 Total"] = s1_total.where(s1_total != 0, output["S1 Male"] + output["S1 Female"])
+
+    output["Upto Q3 Male"] = value_sum(working, uq3_u1_male_cols + uq3_15_male_cols)
+    output["Upto Q3 Female"] = value_sum(working, uq3_u1_female_cols + uq3_15_female_cols)
+    uq3_total = value_sum(working, uq3_total_cols)
+    output["Upto Q3 Total"] = uq3_total.where(uq3_total != 0, output["Upto Q3 Male"] + output["Upto Q3 Female"])
+
+    output["S2 Male"] = value_sum(working, s2_u1_male_cols + s2_15_male_cols)
+    output["S2 Female"] = value_sum(working, s2_u1_female_cols + s2_15_female_cols)
+    s2_total = value_sum(working, s2_total_cols)
+    output["S2 Total"] = s2_total.where(s2_total != 0, output["S2 Male"] + output["S2 Female"])
+
+    metric_cols = [
+        "Annual Target", "Annual Male", "Annaul Female", "Annual Total",
+        "S1 Male", "S1 Female", "S1 Total",
+        "Upto Q3 Male", "Upto Q3 Female", "Upto Q3 Total",
+        "S2 Male", "S2 Female", "S2 Total",
+    ]
+    output[metric_cols] = output[metric_cols].fillna(0)
+
+    return output.reset_index(drop=True)
+
+
 def read_target_sheet(path: Path, canonical_sheet: str, aliases: list[str]) -> pd.DataFrame:
     workbook = pd.ExcelFile(path)
     sheet_name = resolve_sheet_name(workbook, aliases)
@@ -554,6 +651,8 @@ def main() -> None:
             sheet_map[canonical] = combine_sheet(chdn_path, kna_path, canonical, aliases)
         if "indicators" in sheet_map:
             sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_sheet_map(sheet_map)
+        if "ALOD_cummu" in sheet_map:
+            sheet_map[AT_LEAST_ONE_SEMESTER_SHEET_NAME] = build_at_least_one_semester_from_alod(sheet_map["ALOD_cummu"])
     except PermissionError as exc:
         raise PermissionError(
             "Cannot read one or more source workbooks. Close CHDN/KNA files in Excel and run again."
