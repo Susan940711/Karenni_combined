@@ -405,13 +405,13 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
 
     dimension_cols, _ = detect_dimension_columns(indicators_df)
     organization_col = next((c for c in indicators_df.columns if normalize_name(c) == "organization"), None)
-    group_cols = [col for col in dimension_cols if col != period_col]
+    # Keep period in grouping so all period values (including different years) are preserved.
+    group_cols = [col for col in dimension_cols]
     if organization_col is not None and organization_col in indicators_df.columns and organization_col not in group_cols:
         group_cols.append(organization_col)
 
     if not quarter_value_cols:
         base = indicators_df[group_cols].drop_duplicates() if group_cols else pd.DataFrame([{}])
-        base[period_col] = "Semester"
         for label in [
             "S1 Target", "S1 Male", "S1 Female", "S1 Total",
             "S2 Target", "S2 Male", "S2 Female", "S2 Total",
@@ -478,18 +478,7 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
             merged[label] = 0
         merged[label] = merged[label].fillna(0)
 
-    # Keep period value from indicators source (first non-empty value per group).
-    period_source = indicators_df.copy()
-    period_values = period_source[period_col].astype("string").fillna("").str.strip()
-    period_source = period_source.loc[period_values != ""]
-
-    if group_cols and not period_source.empty:
-        period_lookup = period_source[group_cols + [period_col]].drop_duplicates(subset=group_cols, keep="first")
-        merged = merged.merge(period_lookup, on=group_cols, how="left")
-    elif not period_source.empty:
-        merged[period_col] = period_source[period_col].iloc[0]
-    else:
-        merged[period_col] = ""
+    # Period is preserved from indicators because period is part of group_cols.
 
     output_columns = [col for col in indicators_df.columns if col in dimension_cols or col == organization_col]
     if period_col not in output_columns:
