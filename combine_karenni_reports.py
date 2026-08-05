@@ -149,6 +149,61 @@ def coalesce_idp_dimension_columns(df: pd.DataFrame) -> pd.DataFrame:
     return working
 
 
+def normalize_idp_grouping_values(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize IDP grouping key values so CHDN/KNA rows aggregate reliably."""
+    if df.empty:
+        return df
+
+    working = df.copy()
+
+    def clean_text(value: object) -> str:
+        if is_empty_value(value):
+            return ""
+        return re.sub(r"\s+", " ", str(value).strip())
+
+    year_col = find_column_by_token(working, "year")
+    if year_col is not None:
+        year_num = cleaned_numeric(working[year_col])
+        year_text = year_num.apply(lambda x: "" if pd.isna(x) else str(int(x)) if float(x).is_integer() else str(x))
+        existing = working[year_col].apply(clean_text)
+        working[year_col] = year_text.where(year_text != "", existing)
+
+    period_col = find_column_by_token(working, "period")
+    if period_col is not None:
+        def normalize_period(value: object) -> str:
+            text = clean_text(value)
+            quarter = canonical_quarter_label(text)
+            if quarter is not None:
+                return quarter
+            norm = normalize_name(text)
+            if norm == "s1":
+                return "S1"
+            if norm == "s2":
+                return "S2"
+            if norm == "annual":
+                return "Annual"
+            return text
+
+        working[period_col] = working[period_col].apply(normalize_period)
+
+    project_col = next((c for c in working.columns if "project" in normalize_name(c)), None)
+    if project_col is not None:
+        working[project_col] = working[project_col].apply(clean_text)
+
+    indicator_col = next((c for c in working.columns if normalize_name(c) == "indicator"), None)
+    if indicator_col is not None:
+        def normalize_indicator(value: object) -> str:
+            text = clean_text(value)
+            norm = normalize_name(text)
+            if "penta1" in norm or ("penta" in norm and "1" in norm):
+                return "Penta1"
+            return text
+
+        working[indicator_col] = working[indicator_col].apply(normalize_indicator)
+
+    return working
+
+
 def cleaned_numeric(series: pd.Series) -> pd.Series:
     as_str = series.astype(str).str.replace(",", "", regex=False).str.strip()
     as_str = as_str.where(~series.isna(), other="")
@@ -877,6 +932,7 @@ def combine_sheet(chdn_path: Path, kna_path: Path, canonical_sheet: str, aliases
 
     if canonical_sheet == "IDP":
         combined = coalesce_idp_dimension_columns(combined)
+        combined = normalize_idp_grouping_values(combined)
 
     # Summary sheet should include only township-level rows and no appended totals.
     if canonical_sheet == "Summary":
