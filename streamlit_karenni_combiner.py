@@ -39,8 +39,8 @@ def main() -> None:
 
     st.title("Karenni Combination Builder")
     st.caption(
-        "Combine CHDN and KNA report sheets. The Summary sheet keeps township-level rows only "
-        "(clinic rows removed) and does not append Karenni Total rows."
+        "Combine CHDN and KNA report sheets. The Summary sheet rolls clinic data up to township level, "
+        "removes the clinic column, and does not append Karenni Total rows."
     )
 
     with st.expander("Target sheets", expanded=True):
