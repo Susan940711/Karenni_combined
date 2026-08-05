@@ -7,7 +7,7 @@ This package combines CHDN and KNA report workbooks for these sheets only:
 - IDP
 - Td2_indicator
 
-For the `Summary` sheet, it keeps township-level rows only (removes clinic rows) and does not append Karenni Total rows.
+For the `Summary` sheet, it combines clinic-level rows into township totals, removes the clinic column, and does not append Karenni Total rows.
 
 For other target sheets, it appends new rows in `Organization` as `Karenni Total` by summing reported numeric values from CHDN and KNA.
 
