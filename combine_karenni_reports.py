@@ -18,6 +18,7 @@ TARGET_SHEETS: dict[str, list[str]] = {
 }
 
 SEMESTER_REPORT_SHEET_NAME = "semester report"
+SEMESTER_ALOD_OVERRIDE_LABEL = "At least one dose under 5-yr-old"
 
 
 def normalize_name(value: str) -> str:
@@ -174,6 +175,89 @@ def canonical_quarter_label(value: object) -> str | None:
     if norm in {"4", "04"} or any(token in norm for token in q4_tokens):
         return "Q4"
     return None
+
+
+def build_semester_metric_frame(source_df: pd.DataFrame) -> pd.DataFrame:
+    if source_df.empty:
+        return source_df.copy()
+
+    def quarter_metric_columns(
+        quarter: int,
+        required_tokens: list[str],
+        banned_tokens: list[str] | None = None,
+    ) -> list[str]:
+        banned_tokens = banned_tokens or []
+        quarter_tokens = [f"q{quarter}", f"quarter{quarter}", f"qtr{quarter}"]
+
+        matches: list[str] = []
+        for col in source_df.columns:
+            norm = normalize_name(col)
+            if not any(token in norm for token in quarter_tokens):
+                continue
+            if any(token not in norm for token in required_tokens):
+                continue
+            if any(bad in norm for bad in banned_tokens):
+                continue
+            matches.append(col)
+        return matches
+
+    q_cols: dict[int, dict[str, list[str]]] = {}
+    for q in [1, 2, 3, 4]:
+        q_cols[q] = {
+            "target": quarter_metric_columns(q, ["target"]),
+            "u1_male": quarter_metric_columns(q, ["u1", "male"], banned_tokens=["female"]),
+            "u1_female": quarter_metric_columns(q, ["u1", "female"]),
+            "one5_male": quarter_metric_columns(q, ["15", "male"], banned_tokens=["female"]),
+            "one5_female": quarter_metric_columns(q, ["15", "female"]),
+            "total": quarter_metric_columns(q, ["total"], banned_tokens=["subtotal", "grandtotal"]),
+        }
+
+    quarter_value_cols = list(
+        dict.fromkeys(
+            col
+            for q in [1, 2, 3, 4]
+            for cols in q_cols[q].values()
+            for col in cols
+        )
+    )
+
+    working = source_df.copy()
+    for col in quarter_value_cols:
+        working[col] = cleaned_numeric(working[col])
+
+    def row_sum(frame: pd.DataFrame, names: list[str]) -> pd.Series:
+        present = [name for name in names if name in frame.columns]
+        if not present:
+            return pd.Series(0, index=frame.index, dtype="float64")
+        return frame[present].sum(axis=1, min_count=1).fillna(0)
+
+    working["S1 Target"] = row_sum(working, q_cols[1]["target"] + q_cols[2]["target"])
+    working["S1 Male"] = row_sum(working, q_cols[1]["u1_male"] + q_cols[1]["one5_male"] + q_cols[2]["u1_male"] + q_cols[2]["one5_male"])
+    working["S1 Female"] = row_sum(working, q_cols[1]["u1_female"] + q_cols[1]["one5_female"] + q_cols[2]["u1_female"] + q_cols[2]["one5_female"])
+    s1_total_cols = q_cols[1]["total"] + q_cols[2]["total"]
+    working["S1 Total"] = row_sum(working, s1_total_cols) if s1_total_cols else working["S1 Male"] + working["S1 Female"]
+
+    working["S2 Target"] = row_sum(working, q_cols[3]["target"] + q_cols[4]["target"])
+    working["S2 Male"] = row_sum(working, q_cols[3]["u1_male"] + q_cols[3]["one5_male"] + q_cols[4]["u1_male"] + q_cols[4]["one5_male"])
+    working["S2 Female"] = row_sum(working, q_cols[3]["u1_female"] + q_cols[3]["one5_female"] + q_cols[4]["u1_female"] + q_cols[4]["one5_female"])
+    s2_total_cols = q_cols[3]["total"] + q_cols[4]["total"]
+    working["S2 Total"] = row_sum(working, s2_total_cols) if s2_total_cols else working["S2 Male"] + working["S2 Female"]
+
+    working["Annual Target"] = row_sum(working, q_cols[1]["target"] + q_cols[2]["target"] + q_cols[3]["target"] + q_cols[4]["target"])
+    working["Annual Male"] = row_sum(working, q_cols[1]["u1_male"] + q_cols[1]["one5_male"] + q_cols[2]["u1_male"] + q_cols[2]["one5_male"] + q_cols[3]["u1_male"] + q_cols[3]["one5_male"] + q_cols[4]["u1_male"] + q_cols[4]["one5_male"])
+    working["Annual Female"] = row_sum(working, q_cols[1]["u1_female"] + q_cols[1]["one5_female"] + q_cols[2]["u1_female"] + q_cols[2]["one5_female"] + q_cols[3]["u1_female"] + q_cols[3]["one5_female"] + q_cols[4]["u1_female"] + q_cols[4]["one5_female"])
+    annual_total_cols = q_cols[1]["total"] + q_cols[2]["total"] + q_cols[3]["total"] + q_cols[4]["total"]
+    working["Annual Total"] = row_sum(working, annual_total_cols) if annual_total_cols else working["Annual Male"] + working["Annual Female"]
+
+    metric_cols = [
+        "S1 Target", "S1 Male", "S1 Female", "S1 Total",
+        "S2 Target", "S2 Male", "S2 Female", "S2 Total",
+        "Annual Target", "Annual Male", "Annual Female", "Annual Total",
+    ]
+    for label in metric_cols:
+        working[label] = working[label].fillna(0)
+
+    return working
 
 
 def combine_summary_clinic_rows_to_township(df: pd.DataFrame) -> pd.DataFrame:
@@ -356,131 +440,19 @@ def aggregate_by_keys(df: pd.DataFrame, keys: list[str], value_cols: list[str]) 
     )
 
 
-def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.DataFrame:
+def build_semester_report_from_indicators(
+    indicators_df: pd.DataFrame,
+    alod_cummu_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     if indicators_df.empty:
         return indicators_df.copy()
 
     period_col = find_column_by_token(indicators_df, "period")
     if period_col is None:
         raise KeyError("Period column not found in indicators sheet.")
-
-    def quarter_metric_columns(
-        quarter: int,
-        required_tokens: list[str],
-        banned_tokens: list[str] | None = None,
-    ) -> list[str]:
-        banned_tokens = banned_tokens or []
-        quarter_tokens = [f"q{quarter}", f"quarter{quarter}", f"qtr{quarter}"]
-
-        matches: list[str] = []
-        for col in indicators_df.columns:
-            norm = normalize_name(col)
-            if not any(token in norm for token in quarter_tokens):
-                continue
-            if any(token not in norm for token in required_tokens):
-                continue
-            if any(bad in norm for bad in banned_tokens):
-                continue
-            matches.append(col)
-        return matches
-
-    q_cols: dict[int, dict[str, list[str]]] = {}
-    for q in [1, 2, 3, 4]:
-        q_cols[q] = {
-            "target": quarter_metric_columns(q, ["target"]),
-            "u1_male": quarter_metric_columns(q, ["u1", "male"], banned_tokens=["female"]),
-            "u1_female": quarter_metric_columns(q, ["u1", "female"]),
-            "one5_male": quarter_metric_columns(q, ["15", "male"], banned_tokens=["female"]),
-            "one5_female": quarter_metric_columns(q, ["15", "female"]),
-            "total": quarter_metric_columns(q, ["total"], banned_tokens=["subtotal", "grandtotal"]),
-        }
-
-    quarter_value_cols = [
-        col
-        for q in [1, 2, 3, 4]
-        for cols in q_cols[q].values()
-        for col in cols
-    ]
-    quarter_value_cols = list(dict.fromkeys(quarter_value_cols))
-
-    dimension_cols, _ = detect_dimension_columns(indicators_df)
-    organization_col = next((c for c in indicators_df.columns if normalize_name(c) == "organization"), None)
-
-    if not quarter_value_cols:
-        base = indicators_df.copy()
-        for label in [
-            "S1 Target", "S1 Male", "S1 Female", "S1 Total",
-            "S2 Target", "S2 Male", "S2 Female", "S2 Total",
-            "Annual Target", "Annual Male", "Annual Female", "Annual Total",
-        ]:
-            base[label] = 0
-        output_columns = [col for col in indicators_df.columns if col in dimension_cols or col == organization_col]
-        if period_col not in output_columns:
-            output_columns = [period_col, *output_columns]
-        output_columns = [col for col in output_columns if col != period_col]
-        output_columns = [period_col, *output_columns]
-        return base.reindex(columns=output_columns + [
-            "S1 Target", "S1 Male", "S1 Female", "S1 Total",
-            "S2 Target", "S2 Male", "S2 Female", "S2 Total",
-            "Annual Target", "Annual Male", "Annual Female", "Annual Total",
-        ]).reset_index(drop=True)
-
-    working = indicators_df.copy()
-    for col in quarter_value_cols:
-        working[col] = cleaned_numeric(working[col])
-
-    def row_sum(frame: pd.DataFrame, names: list[str]) -> pd.Series:
-        present = [name for name in names if name in frame.columns]
-        if not present:
-            return pd.Series(0, index=frame.index, dtype="float64")
-        return frame[present].sum(axis=1, min_count=1).fillna(0)
-
-    merged = working.copy()
-
-    merged["S1 Target"] = row_sum(merged, q_cols[1]["target"] + q_cols[2]["target"])
-    merged["S1 Male"] = row_sum(merged, q_cols[1]["u1_male"] + q_cols[1]["one5_male"] + q_cols[2]["u1_male"] + q_cols[2]["one5_male"])
-    merged["S1 Female"] = row_sum(merged, q_cols[1]["u1_female"] + q_cols[1]["one5_female"] + q_cols[2]["u1_female"] + q_cols[2]["one5_female"])
-    s1_total_cols = q_cols[1]["total"] + q_cols[2]["total"]
-    s1_total_from_quarter_total = row_sum(merged, s1_total_cols)
-    if s1_total_cols:
-        merged["S1 Total"] = s1_total_from_quarter_total
-    else:
-        merged["S1 Total"] = merged["S1 Male"] + merged["S1 Female"]
-
-    merged["S2 Target"] = row_sum(merged, q_cols[3]["target"] + q_cols[4]["target"])
-    merged["S2 Male"] = row_sum(merged, q_cols[3]["u1_male"] + q_cols[3]["one5_male"] + q_cols[4]["u1_male"] + q_cols[4]["one5_male"])
-    merged["S2 Female"] = row_sum(merged, q_cols[3]["u1_female"] + q_cols[3]["one5_female"] + q_cols[4]["u1_female"] + q_cols[4]["one5_female"])
-    s2_total_cols = q_cols[3]["total"] + q_cols[4]["total"]
-    s2_total_from_quarter_total = row_sum(merged, s2_total_cols)
-    if s2_total_cols:
-        merged["S2 Total"] = s2_total_from_quarter_total
-    else:
-        merged["S2 Total"] = merged["S2 Male"] + merged["S2 Female"]
-
-    merged["Annual Target"] = row_sum(merged, q_cols[1]["target"] + q_cols[2]["target"] + q_cols[3]["target"] + q_cols[4]["target"])
-    merged["Annual Male"] = row_sum(merged, q_cols[1]["u1_male"] + q_cols[1]["one5_male"] + q_cols[2]["u1_male"] + q_cols[2]["one5_male"] + q_cols[3]["u1_male"] + q_cols[3]["one5_male"] + q_cols[4]["u1_male"] + q_cols[4]["one5_male"])
-    merged["Annual Female"] = row_sum(merged, q_cols[1]["u1_female"] + q_cols[1]["one5_female"] + q_cols[2]["u1_female"] + q_cols[2]["one5_female"] + q_cols[3]["u1_female"] + q_cols[3]["one5_female"] + q_cols[4]["u1_female"] + q_cols[4]["one5_female"])
-    annual_total_cols = q_cols[1]["total"] + q_cols[2]["total"] + q_cols[3]["total"] + q_cols[4]["total"]
-    annual_total_from_quarter_total = row_sum(merged, annual_total_cols)
-    if annual_total_cols:
-        merged["Annual Total"] = annual_total_from_quarter_total
-    else:
-        merged["Annual Total"] = merged["Annual Male"] + merged["Annual Female"]
-
-    for label in [
-        "S1 Target", "S1 Male", "S1 Female", "S1 Total",
-        "S2 Target", "S2 Male", "S2 Female", "S2 Total",
-        "Annual Target", "Annual Male", "Annual Female", "Annual Total",
-    ]:
-        if label not in merged.columns:
-            merged[label] = 0
-        merged[label] = merged[label].fillna(0)
-
-    output_columns = [col for col in indicators_df.columns if col in dimension_cols or col == organization_col]
-    if period_col not in output_columns:
-        output_columns = [period_col, *output_columns]
-    output_columns = [col for col in output_columns if col != period_col]
-    output_columns = [period_col, *output_columns]
+    metric_frame = build_semester_metric_frame(indicators_df)
+    dimension_cols, _ = detect_dimension_columns(metric_frame)
+    organization_col = next((c for c in metric_frame.columns if normalize_name(c) == "organization"), None)
 
     metric_columns = [
         "S1 Target", "S1 Male", "S1 Female", "S1 Total",
@@ -488,7 +460,44 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
         "Annual Target", "Annual Male", "Annual Female", "Annual Total",
     ]
 
-    return merged.reindex(columns=output_columns + metric_columns).reset_index(drop=True)
+    output_columns = [col for col in metric_frame.columns if col in dimension_cols or col == organization_col]
+    if period_col not in output_columns:
+        output_columns = [period_col, *output_columns]
+    output_columns = [col for col in output_columns if col != period_col]
+    output_columns = [period_col, *output_columns]
+
+    semester_df = metric_frame.reindex(columns=output_columns + metric_columns).copy()
+
+    if alod_cummu_df is not None and not alod_cummu_df.empty:
+        alod_frame = build_semester_metric_frame(alod_cummu_df)
+        alod_indicator_col = next((c for c in alod_frame.columns if normalize_name(c) == "indicator"), None)
+        semester_indicator_col = next((c for c in semester_df.columns if normalize_name(c) == "indicator"), None)
+
+        if alod_indicator_col is not None and semester_indicator_col is not None:
+            semester_target_mask = (
+                semester_df[semester_indicator_col].astype("string").fillna("").str.strip().map(canonicalize_alod_label)
+                == SEMESTER_ALOD_OVERRIDE_LABEL
+            )
+            alod_target = alod_frame[
+                alod_frame[alod_indicator_col].astype("string").fillna("").str.strip().map(canonicalize_alod_label)
+                == SEMESTER_ALOD_OVERRIDE_LABEL
+            ].copy()
+
+            if not alod_target.empty:
+                key_cols = [col for col in output_columns if col not in metric_columns and col in alod_target.columns]
+                if key_cols:
+                    merge_cols = key_cols + metric_columns
+                    alod_target = alod_target.reindex(columns=merge_cols)
+                    semester_df = semester_df.merge(alod_target, on=key_cols, how="left", suffixes=("", "__alod"))
+                    for metric_col in metric_columns:
+                        override_col = f"{metric_col}__alod"
+                        if override_col in semester_df.columns:
+                            semester_df.loc[semester_target_mask, metric_col] = semester_df.loc[semester_target_mask, override_col].combine_first(
+                                semester_df.loc[semester_target_mask, metric_col]
+                            )
+                            semester_df.drop(columns=[override_col], inplace=True)
+
+    return semester_df.reset_index(drop=True)
 
 
 def read_target_sheet(path: Path, canonical_sheet: str, aliases: list[str]) -> pd.DataFrame:
@@ -571,7 +580,10 @@ def main() -> None:
         for canonical, aliases in TARGET_SHEETS.items():
             sheet_map[canonical] = combine_sheet(chdn_path, kna_path, canonical, aliases)
         if "indicators" in sheet_map:
-            sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_indicators(sheet_map["indicators"])
+            sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_indicators(
+                sheet_map["indicators"],
+                sheet_map.get("ALOD_cummu"),
+            )
     except PermissionError as exc:
         raise PermissionError(
             "Cannot read one or more source workbooks. Close CHDN/KNA files in Excel and run again."
