@@ -18,25 +18,10 @@ TARGET_SHEETS: dict[str, list[str]] = {
 }
 
 SEMESTER_REPORT_SHEET_NAME = "semester report"
-SEMESTER_ALOD_OVERRIDE_LABEL = "At least one dose under 5-yr-old"
 
 
 def normalize_name(value: str) -> str:
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
-
-
-def normalize_key_value(value: object) -> str:
-    if is_empty_value(value):
-        return ""
-    text = str(value).strip()
-    # Align keys like 2026 and 2026.0 across sheets.
-    try:
-        num = float(text.replace(",", ""))
-        if num.is_integer():
-            return str(int(num))
-    except Exception:
-        pass
-    return text
 
 
 def resolve_sheet_name(workbook: pd.ExcelFile, aliases: list[str]) -> str:
@@ -274,89 +259,6 @@ def build_semester_metric_frame(source_df: pd.DataFrame) -> pd.DataFrame:
     return working
 
 
-def build_alod_override_metric_frame(source_df: pd.DataFrame) -> pd.DataFrame:
-    if source_df.empty:
-        return source_df.copy()
-
-    def period_metric_columns(
-        period_prefix: str,
-        required_tokens: list[str],
-        banned_tokens: list[str] | None = None,
-    ) -> list[str]:
-        banned_tokens = banned_tokens or []
-        period_tokens = [period_prefix]
-
-        matches: list[str] = []
-        for col in source_df.columns:
-            norm = normalize_name(col)
-            if not any(token in norm for token in period_tokens):
-                continue
-            if any(token not in norm for token in required_tokens):
-                continue
-            if any(bad in norm for bad in banned_tokens):
-                continue
-            matches.append(col)
-        return matches
-
-    p_cols: dict[str, dict[str, list[str]]] = {}
-    for prefix in ["S1", "S2", "Annual"]:
-        p_cols[prefix] = {
-            "target": period_metric_columns(prefix, ["target"]),
-            "u1_male": period_metric_columns(prefix, ["u1", "male"], banned_tokens=["female"]),
-            "u1_female": period_metric_columns(prefix, ["u1", "female"]),
-            "one5_male": period_metric_columns(prefix, ["15", "male"], banned_tokens=["female"]),
-            "one5_female": period_metric_columns(prefix, ["15", "female"]),
-            "total": period_metric_columns(prefix, ["total"], banned_tokens=["subtotal", "grandtotal"]),
-        }
-
-    period_value_cols = list(
-        dict.fromkeys(
-            col
-            for prefix in ["S1", "S2", "Annual"]
-            for cols in p_cols[prefix].values()
-            for col in cols
-        )
-    )
-
-    working = source_df.copy()
-    for col in period_value_cols:
-        working[col] = cleaned_numeric(working[col])
-
-    def row_sum(frame: pd.DataFrame, names: list[str]) -> pd.Series:
-        present = [name for name in names if name in frame.columns]
-        if not present:
-            return pd.Series(0, index=frame.index, dtype="float64")
-        return frame[present].sum(axis=1, min_count=1).fillna(0)
-
-    working["S1 Target"] = row_sum(working, p_cols["S1"]["target"])
-    working["S1 Male"] = row_sum(working, p_cols["S1"]["u1_male"] + p_cols["S1"]["one5_male"])
-    working["S1 Female"] = row_sum(working, p_cols["S1"]["u1_female"] + p_cols["S1"]["one5_female"])
-    s1_total_cols = p_cols["S1"]["total"]
-    working["S1 Total"] = row_sum(working, s1_total_cols) if s1_total_cols else working["S1 Male"] + working["S1 Female"]
-
-    working["S2 Target"] = row_sum(working, p_cols["S2"]["target"])
-    working["S2 Male"] = row_sum(working, p_cols["S2"]["u1_male"] + p_cols["S2"]["one5_male"])
-    working["S2 Female"] = row_sum(working, p_cols["S2"]["u1_female"] + p_cols["S2"]["one5_female"])
-    s2_total_cols = p_cols["S2"]["total"]
-    working["S2 Total"] = row_sum(working, s2_total_cols) if s2_total_cols else working["S2 Male"] + working["S2 Female"]
-
-    working["Annual Target"] = row_sum(working, p_cols["Annual"]["target"])
-    working["Annual Male"] = row_sum(working, p_cols["Annual"]["u1_male"] + p_cols["Annual"]["one5_male"])
-    working["Annual Female"] = row_sum(working, p_cols["Annual"]["u1_female"] + p_cols["Annual"]["one5_female"])
-    annual_total_cols = p_cols["Annual"]["total"]
-    working["Annual Total"] = row_sum(working, annual_total_cols) if annual_total_cols else working["Annual Male"] + working["Annual Female"]
-
-    metric_cols = [
-        "S1 Target", "S1 Male", "S1 Female", "S1 Total",
-        "S2 Target", "S2 Male", "S2 Female", "S2 Total",
-        "Annual Target", "Annual Male", "Annual Female", "Annual Total",
-    ]
-    for label in metric_cols:
-        working[label] = working[label].fillna(0)
-
-    return working
-
-
 def combine_summary_clinic_rows_to_township(df: pd.DataFrame) -> pd.DataFrame:
     township_col = find_column_by_token(df, "township")
     clinic_col = find_column_by_token(df, "clinic")
@@ -539,7 +441,6 @@ def aggregate_by_keys(df: pd.DataFrame, keys: list[str], value_cols: list[str]) 
 
 def build_semester_report_from_indicators(
     indicators_df: pd.DataFrame,
-    alod_cummu_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     if indicators_df.empty:
         return indicators_df.copy()
@@ -564,86 +465,12 @@ def build_semester_report_from_indicators(
     output_columns = [period_col, *output_columns]
 
     semester_df = metric_frame.reindex(columns=output_columns + metric_columns).copy()
-
-    if alod_cummu_df is not None and not alod_cummu_df.empty:
-        alod_frame = build_alod_override_metric_frame(alod_cummu_df)
-        semester_indicator_col = next((c for c in semester_df.columns if normalize_name(c) == "indicator"), None)
-        semester_organization_col = next((c for c in semester_df.columns if normalize_name(c) == "organization"), None)
-        project_col = next((c for c in semester_df.columns if "project" in normalize_name(c)), None)
-        alod_indicator_col = next((c for c in alod_frame.columns if normalize_name(c) == "indicator"), None)
-        alod_period_col = next((c for c in alod_frame.columns if normalize_name(c) == "period"), None)
-        alod_organization_col = next((c for c in alod_frame.columns if normalize_name(c) == "organization"), None)
-        alod_project_col = next((c for c in alod_frame.columns if "project" in normalize_name(c)), None)
-
-        if alod_indicator_col is not None:
-            alod_target = alod_frame[
-                alod_frame[alod_indicator_col].astype("string").fillna("").str.strip().map(canonicalize_alod_label)
-                == SEMESTER_ALOD_OVERRIDE_LABEL
-            ].copy()
-        else:
-            alod_target = pd.DataFrame()
-
-        if semester_indicator_col is not None and not alod_target.empty:
-            target_rows = semester_df.index[
-                semester_df[semester_indicator_col].astype("string").fillna("").str.strip().map(canonicalize_alod_label)
-                == SEMESTER_ALOD_OVERRIDE_LABEL
-            ].tolist()
-
-            def pick_best_row(candidates: pd.DataFrame) -> pd.Series | None:
-                if candidates.empty:
-                    return None
-                scores = candidates[metric_columns].sum(axis=1, min_count=1).fillna(0)
-                return candidates.loc[scores.idxmax()]
-
-            for row_index in target_rows:
-                period_value = normalize_key_value(semester_df.at[row_index, period_col])
-                org_value = normalize_key_value(semester_df.at[row_index, semester_organization_col]) if semester_organization_col in semester_df.columns else ""
-                project_value = normalize_key_value(semester_df.at[row_index, project_col]) if project_col in semester_df.columns else ""
-
-                candidates = alod_target.copy()
-                if alod_period_col is not None:
-                    candidates = candidates[
-                        candidates[alod_period_col].map(normalize_key_value) == period_value
-                    ]
-                if alod_organization_col is not None and org_value:
-                    org_candidates = candidates[
-                        candidates[alod_organization_col].map(normalize_key_value) == org_value
-                    ]
-                    if not org_candidates.empty:
-                        candidates = org_candidates
-                if alod_project_col is not None and project_value:
-                    project_candidates = candidates[
-                        candidates[alod_project_col].map(normalize_key_value) == project_value
-                    ]
-                    if not project_candidates.empty:
-                        candidates = project_candidates
-
-                source_row = pick_best_row(candidates)
-
-                if source_row is None:
-                    fallback = alod_target.copy()
-                    if alod_period_col is not None:
-                        fallback = fallback[
-                            fallback[alod_period_col].map(normalize_key_value) == period_value
-                        ]
-                    source_row = pick_best_row(fallback)
-
-                if source_row is None:
-                    continue
-
-                for metric_col in metric_columns:
-                    if metric_col in source_row:
-                        semester_df.at[row_index, metric_col] = source_row[metric_col]
-
     return semester_df.reset_index(drop=True)
 
 
 def build_semester_report_from_sheet_map(sheet_map: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Build the semester sheet from the already combined output sheet data."""
-    return build_semester_report_from_indicators(
-        sheet_map["indicators"],
-        sheet_map.get("ALOD_cummu"),
-    )
+    return build_semester_report_from_indicators(sheet_map["indicators"])
 
 
 def read_target_sheet(path: Path, canonical_sheet: str, aliases: list[str]) -> pd.DataFrame:
