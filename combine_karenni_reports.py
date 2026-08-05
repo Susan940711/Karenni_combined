@@ -343,6 +343,47 @@ def build_alod_override_metric_frame(source_df: pd.DataFrame) -> pd.DataFrame:
     return working
 
 
+def build_alod_semester_lookup(source_df: pd.DataFrame) -> dict[tuple[str, str, str, str], pd.Series]:
+    if source_df.empty:
+        return {}
+
+    frame = build_alod_override_metric_frame(source_df)
+    indicator_col = next((c for c in frame.columns if normalize_name(c) == "indicator"), None)
+    period_col = next((c for c in frame.columns if normalize_name(c) == "period"), None)
+    organization_col = next((c for c in frame.columns if normalize_name(c) == "organization"), None)
+    project_col = next((c for c in frame.columns if "project" in normalize_name(c)), None)
+
+    if indicator_col is None:
+        return {}
+
+    lookup: dict[tuple[str, str, str, str], pd.Series] = {}
+    metric_columns = [
+        "S1 Target", "S1 Male", "S1 Female", "S1 Total",
+        "S2 Target", "S2 Male", "S2 Female", "S2 Total",
+        "Annual Target", "Annual Male", "Annual Female", "Annual Total",
+    ]
+
+    for _, row in frame.iterrows():
+        label = canonicalize_alod_label(row.get(indicator_col, ""))
+        if label != SEMESTER_ALOD_OVERRIDE_LABEL:
+            continue
+
+        period_value = str(row.get(period_col, "")).strip() if period_col is not None else ""
+        organization_value = str(row.get(organization_col, "")).strip() if organization_col is not None else ""
+        project_value = str(row.get(project_col, "")).strip() if project_col is not None else ""
+
+        key = (period_value, organization_value, project_value, label)
+        score = float(pd.Series([row.get(metric, 0) for metric in metric_columns]).sum())
+
+        existing = lookup.get(key)
+        existing_score = -1.0 if existing is None else float(pd.Series([existing.get(metric, 0) for metric in metric_columns]).sum())
+
+        if existing is None or score > existing_score:
+            lookup[key] = row
+
+    return lookup
+
+
 def combine_summary_clinic_rows_to_township(df: pd.DataFrame) -> pd.DataFrame:
     township_col = find_column_by_token(df, "township")
     clinic_col = find_column_by_token(df, "clinic")
@@ -525,7 +566,7 @@ def aggregate_by_keys(df: pd.DataFrame, keys: list[str], value_cols: list[str]) 
 
 def build_semester_report_from_indicators(
     indicators_df: pd.DataFrame,
-    alod_cummu_df: pd.DataFrame | None = None,
+    alod_lookup: dict[tuple[str, str, str, str], pd.Series] | None = None,
 ) -> pd.DataFrame:
     if indicators_df.empty:
         return indicators_df.copy()
@@ -551,89 +592,51 @@ def build_semester_report_from_indicators(
 
     semester_df = metric_frame.reindex(columns=output_columns + metric_columns).copy()
 
-    if alod_cummu_df is not None and not alod_cummu_df.empty:
-        alod_frame = build_alod_override_metric_frame(alod_cummu_df)
-        alod_indicator_col = next((c for c in alod_frame.columns if normalize_name(c) == "indicator"), None)
+    if alod_lookup:
         semester_indicator_col = next((c for c in semester_df.columns if normalize_name(c) == "indicator"), None)
-        project_col = next((c for c in semester_df.columns if "project" in normalize_name(c)), None)
-        alod_project_col = next((c for c in alod_frame.columns if "project" in normalize_name(c)), None)
-        alod_period_col = next((c for c in alod_frame.columns if normalize_name(c) == "period"), None)
         semester_organization_col = next((c for c in semester_df.columns if normalize_name(c) == "organization"), None)
-        alod_organization_col = next((c for c in alod_frame.columns if normalize_name(c) == "organization"), None)
+        project_col = next((c for c in semester_df.columns if "project" in normalize_name(c)), None)
 
-        if alod_indicator_col is not None and semester_indicator_col is not None:
-            semester_target_mask = (
+        if semester_indicator_col is not None:
+            target_rows = semester_df.index[
                 semester_df[semester_indicator_col].astype("string").fillna("").str.strip().map(canonicalize_alod_label)
                 == SEMESTER_ALOD_OVERRIDE_LABEL
-            )
-            alod_target = alod_frame[
-                alod_frame[alod_indicator_col].astype("string").fillna("").str.strip().map(canonicalize_alod_label)
-                == SEMESTER_ALOD_OVERRIDE_LABEL
-            ].copy()
+            ].tolist()
 
-            if not alod_target.empty:
-                key_pairs: list[tuple[str, str]] = []
-                for left_col, right_col in [
-                    (period_col, alod_period_col),
-                    (semester_organization_col, alod_organization_col),
-                    (project_col, alod_project_col),
-                ]:
-                    if left_col is not None and right_col is not None:
-                        key_pairs.append((left_col, right_col))
+            for row_index in target_rows:
+                period_value = str(semester_df.at[row_index, period_col]).strip()
+                org_value = str(semester_df.at[row_index, semester_organization_col]).strip() if semester_organization_col in semester_df.columns else ""
+                project_value = str(semester_df.at[row_index, project_col]).strip() if project_col in semester_df.columns else ""
+                key_candidates = [
+                    (period_value, org_value, project_value, SEMESTER_ALOD_OVERRIDE_LABEL),
+                    (period_value, "", project_value, SEMESTER_ALOD_OVERRIDE_LABEL),
+                    (period_value, org_value, "", SEMESTER_ALOD_OVERRIDE_LABEL),
+                    (period_value, "", "", SEMESTER_ALOD_OVERRIDE_LABEL),
+                    ("", "", "", SEMESTER_ALOD_OVERRIDE_LABEL),
+                ]
 
-                def score_rows(frame: pd.DataFrame) -> pd.DataFrame:
-                    scored = frame.copy()
-                    scored["__score"] = scored[metric_columns].sum(axis=1, min_count=1).fillna(0)
-                    scored["__is_karenni"] = False
-                    if alod_organization_col is not None:
-                        scored["__is_karenni"] = scored[alod_organization_col].astype("string").fillna("").str.strip().eq("Karenni Total")
-                    return scored.sort_values(by=["__score", "__is_karenni"], ascending=[False, False])
+                source_row = None
+                for key in key_candidates:
+                    if key in alod_lookup:
+                        source_row = alod_lookup[key]
+                        break
 
-                def select_alod_row(left_index: int) -> pd.Series:
-                    tiers: list[pd.DataFrame] = []
+                if source_row is None:
+                    continue
 
-                    exact = alod_target
-                    for left_col, right_col in key_pairs:
-                        left_value = semester_df.at[left_index, left_col] if left_col in semester_df.columns else None
-                        exact = exact[exact[right_col].astype("string").fillna("").str.strip() == str(left_value).strip()]
-                    if not exact.empty:
-                        tiers.append(exact)
-
-                    period_only = alod_target
-                    if alod_period_col is not None and period_col in semester_df.columns:
-                        left_value = semester_df.at[left_index, period_col]
-                        period_only = period_only[
-                            period_only[alod_period_col].astype("string").fillna("").str.strip() == str(left_value).strip()
-                        ]
-                        if not period_only.empty:
-                            tiers.append(period_only)
-
-                    tiers.append(alod_target)
-
-                    for candidate in tiers:
-                        scored = score_rows(candidate)
-                        if not scored.empty:
-                            top = scored.iloc[0]
-                            if float(top["__score"]) > 0:
-                                return top
-
-                    return score_rows(alod_target).iloc[0]
-
-                target_rows = semester_df.index[semester_target_mask].tolist()
-                for row_index in target_rows:
-                    source_row = select_alod_row(row_index)
-                    for metric_col in metric_columns:
-                        if metric_col in source_row:
-                            semester_df.at[row_index, metric_col] = source_row[metric_col]
+                for metric_col in metric_columns:
+                    if metric_col in source_row:
+                        semester_df.at[row_index, metric_col] = source_row[metric_col]
 
     return semester_df.reset_index(drop=True)
 
 
 def build_semester_report_from_sheet_map(sheet_map: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Build the semester sheet from the already combined output sheet data."""
+    alod_lookup = build_alod_semester_lookup(sheet_map.get("ALOD_cummu", pd.DataFrame()))
     return build_semester_report_from_indicators(
         sheet_map["indicators"],
-        sheet_map.get("ALOD_cummu"),
+        alod_lookup,
     )
 
 
