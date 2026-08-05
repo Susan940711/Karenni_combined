@@ -405,20 +405,20 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
 
     dimension_cols, _ = detect_dimension_columns(indicators_df)
     organization_col = next((c for c in indicators_df.columns if normalize_name(c) == "organization"), None)
-    # Keep period in grouping so all period values (including different years) are preserved.
-    group_cols = [col for col in dimension_cols]
-    if organization_col is not None and organization_col in indicators_df.columns and organization_col not in group_cols:
-        group_cols.append(organization_col)
 
     if not quarter_value_cols:
-        base = indicators_df[group_cols].drop_duplicates() if group_cols else pd.DataFrame([{}])
+        base = indicators_df.copy()
         for label in [
             "S1 Target", "S1 Male", "S1 Female", "S1 Total",
             "S2 Target", "S2 Male", "S2 Female", "S2 Total",
             "Annual Target", "Annual Male", "Annual Female", "Annual Total",
         ]:
             base[label] = 0
-        output_columns = [period_col, *[c for c in dimension_cols if c != period_col]]
+        output_columns = [col for col in indicators_df.columns if col in dimension_cols or col == organization_col]
+        if period_col not in output_columns:
+            output_columns = [period_col, *output_columns]
+        output_columns = [col for col in output_columns if col != period_col]
+        output_columns = [period_col, *output_columns]
         return base.reindex(columns=output_columns + [
             "S1 Target", "S1 Male", "S1 Female", "S1 Total",
             "S2 Target", "S2 Male", "S2 Female", "S2 Total",
@@ -429,41 +429,39 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
     for col in quarter_value_cols:
         working[col] = cleaned_numeric(working[col])
 
-    aggregated = aggregate_by_keys(working, group_cols, quarter_value_cols)
-
-    def colsum(frame: pd.DataFrame, names: list[str]) -> pd.Series:
+    def row_sum(frame: pd.DataFrame, names: list[str]) -> pd.Series:
         present = [name for name in names if name in frame.columns]
         if not present:
             return pd.Series(0, index=frame.index, dtype="float64")
         return frame[present].sum(axis=1, min_count=1).fillna(0)
 
-    merged = aggregated.copy()
+    merged = working.copy()
 
-    merged["S1 Target"] = colsum(merged, q_cols[1]["target"] + q_cols[2]["target"])
-    merged["S1 Male"] = colsum(merged, q_cols[1]["u1_male"] + q_cols[1]["one5_male"] + q_cols[2]["u1_male"] + q_cols[2]["one5_male"])
-    merged["S1 Female"] = colsum(merged, q_cols[1]["u1_female"] + q_cols[1]["one5_female"] + q_cols[2]["u1_female"] + q_cols[2]["one5_female"])
+    merged["S1 Target"] = row_sum(merged, q_cols[1]["target"] + q_cols[2]["target"])
+    merged["S1 Male"] = row_sum(merged, q_cols[1]["u1_male"] + q_cols[1]["one5_male"] + q_cols[2]["u1_male"] + q_cols[2]["one5_male"])
+    merged["S1 Female"] = row_sum(merged, q_cols[1]["u1_female"] + q_cols[1]["one5_female"] + q_cols[2]["u1_female"] + q_cols[2]["one5_female"])
     s1_total_cols = q_cols[1]["total"] + q_cols[2]["total"]
-    s1_total_from_quarter_total = colsum(merged, s1_total_cols)
+    s1_total_from_quarter_total = row_sum(merged, s1_total_cols)
     if s1_total_cols:
         merged["S1 Total"] = s1_total_from_quarter_total
     else:
         merged["S1 Total"] = merged["S1 Male"] + merged["S1 Female"]
 
-    merged["S2 Target"] = colsum(merged, q_cols[3]["target"] + q_cols[4]["target"])
-    merged["S2 Male"] = colsum(merged, q_cols[3]["u1_male"] + q_cols[3]["one5_male"] + q_cols[4]["u1_male"] + q_cols[4]["one5_male"])
-    merged["S2 Female"] = colsum(merged, q_cols[3]["u1_female"] + q_cols[3]["one5_female"] + q_cols[4]["u1_female"] + q_cols[4]["one5_female"])
+    merged["S2 Target"] = row_sum(merged, q_cols[3]["target"] + q_cols[4]["target"])
+    merged["S2 Male"] = row_sum(merged, q_cols[3]["u1_male"] + q_cols[3]["one5_male"] + q_cols[4]["u1_male"] + q_cols[4]["one5_male"])
+    merged["S2 Female"] = row_sum(merged, q_cols[3]["u1_female"] + q_cols[3]["one5_female"] + q_cols[4]["u1_female"] + q_cols[4]["one5_female"])
     s2_total_cols = q_cols[3]["total"] + q_cols[4]["total"]
-    s2_total_from_quarter_total = colsum(merged, s2_total_cols)
+    s2_total_from_quarter_total = row_sum(merged, s2_total_cols)
     if s2_total_cols:
         merged["S2 Total"] = s2_total_from_quarter_total
     else:
         merged["S2 Total"] = merged["S2 Male"] + merged["S2 Female"]
 
-    merged["Annual Target"] = colsum(merged, q_cols[1]["target"] + q_cols[2]["target"] + q_cols[3]["target"] + q_cols[4]["target"])
-    merged["Annual Male"] = colsum(merged, q_cols[1]["u1_male"] + q_cols[1]["one5_male"] + q_cols[2]["u1_male"] + q_cols[2]["one5_male"] + q_cols[3]["u1_male"] + q_cols[3]["one5_male"] + q_cols[4]["u1_male"] + q_cols[4]["one5_male"])
-    merged["Annual Female"] = colsum(merged, q_cols[1]["u1_female"] + q_cols[1]["one5_female"] + q_cols[2]["u1_female"] + q_cols[2]["one5_female"] + q_cols[3]["u1_female"] + q_cols[3]["one5_female"] + q_cols[4]["u1_female"] + q_cols[4]["one5_female"])
+    merged["Annual Target"] = row_sum(merged, q_cols[1]["target"] + q_cols[2]["target"] + q_cols[3]["target"] + q_cols[4]["target"])
+    merged["Annual Male"] = row_sum(merged, q_cols[1]["u1_male"] + q_cols[1]["one5_male"] + q_cols[2]["u1_male"] + q_cols[2]["one5_male"] + q_cols[3]["u1_male"] + q_cols[3]["one5_male"] + q_cols[4]["u1_male"] + q_cols[4]["one5_male"])
+    merged["Annual Female"] = row_sum(merged, q_cols[1]["u1_female"] + q_cols[1]["one5_female"] + q_cols[2]["u1_female"] + q_cols[2]["one5_female"] + q_cols[3]["u1_female"] + q_cols[3]["one5_female"] + q_cols[4]["u1_female"] + q_cols[4]["one5_female"])
     annual_total_cols = q_cols[1]["total"] + q_cols[2]["total"] + q_cols[3]["total"] + q_cols[4]["total"]
-    annual_total_from_quarter_total = colsum(merged, annual_total_cols)
+    annual_total_from_quarter_total = row_sum(merged, annual_total_cols)
     if annual_total_cols:
         merged["Annual Total"] = annual_total_from_quarter_total
     else:
@@ -477,8 +475,6 @@ def build_semester_report_from_indicators(indicators_df: pd.DataFrame) -> pd.Dat
         if label not in merged.columns:
             merged[label] = 0
         merged[label] = merged[label].fillna(0)
-
-    # Period is preserved from indicators because period is part of group_cols.
 
     output_columns = [col for col in indicators_df.columns if col in dimension_cols or col == organization_col]
     if period_col not in output_columns:
