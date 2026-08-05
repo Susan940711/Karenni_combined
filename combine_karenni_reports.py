@@ -555,6 +555,8 @@ def build_semester_report_from_indicators(
         alod_frame = build_alod_override_metric_frame(alod_cummu_df)
         alod_indicator_col = next((c for c in alod_frame.columns if normalize_name(c) == "indicator"), None)
         semester_indicator_col = next((c for c in semester_df.columns if normalize_name(c) == "indicator"), None)
+        project_col = next((c for c in semester_df.columns if "project" in normalize_name(c)), None)
+        alod_project_col = next((c for c in alod_frame.columns if "project" in normalize_name(c)), None)
 
         if alod_indicator_col is not None and semester_indicator_col is not None:
             semester_target_mask = (
@@ -567,25 +569,32 @@ def build_semester_report_from_indicators(
             ].copy()
 
             if not alod_target.empty:
-                key_cols = [col for col in output_columns if col not in metric_columns and col in alod_target.columns]
-                if key_cols:
-                    merge_cols = key_cols + metric_columns
-                    alod_target = alod_target.reindex(columns=merge_cols)
-                    semester_df = semester_df.merge(alod_target, on=key_cols, how="left", suffixes=("", "__alod"))
-                    for metric_col in metric_columns:
-                        override_col = f"{metric_col}__alod"
-                        if override_col in semester_df.columns:
-                            semester_df.loc[semester_target_mask, metric_col] = semester_df.loc[semester_target_mask, override_col].combine_first(
-                                semester_df.loc[semester_target_mask, metric_col]
-                            )
-                            semester_df.drop(columns=[override_col], inplace=True)
+                key_pairs: list[tuple[str, str]] = []
+                for left_col, right_col in [
+                    (period_col, period_col),
+                    (semester_indicator_col, alod_indicator_col),
+                    (organization_col, organization_col if organization_col in alod_frame.columns else None),
+                    (project_col, alod_project_col),
+                ]:
+                    if left_col is not None and right_col is not None and right_col in alod_frame.columns:
+                        key_pairs.append((left_col, right_col))
 
-                # Fallback: if ALOD has a single matching row, copy its semester metrics directly.
-                if len(alod_target) == 1 and semester_target_mask.any():
-                    direct_values = alod_target.iloc[0][metric_columns]
+                target_rows = semester_df.index[semester_target_mask].tolist()
+                for row_index in target_rows:
+                    row_mask = pd.Series(True, index=alod_target.index)
+                    for left_col, right_col in key_pairs:
+                        left_value = semester_df.at[row_index, left_col] if left_col in semester_df.columns else None
+                        if right_col in alod_target.columns:
+                            row_mask &= alod_target[right_col].astype("string").fillna("").str.strip() == str(left_value).strip()
+
+                    matching_rows = alod_target.loc[row_mask]
+                    if matching_rows.empty:
+                        matching_rows = alod_target.iloc[[0]]
+
+                    source_row = matching_rows.iloc[0]
                     for metric_col in metric_columns:
-                        if metric_col in direct_values:
-                            semester_df.loc[semester_target_mask, metric_col] = direct_values[metric_col]
+                        if metric_col in source_row:
+                            semester_df.at[row_index, metric_col] = source_row[metric_col]
 
     return semester_df.reset_index(drop=True)
 
