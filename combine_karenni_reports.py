@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import argparse
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 import re
+import hashlib
 
 import pandas as pd
+import streamlit as st
 
 
 TARGET_SHEETS: dict[str, list[str]] = {
@@ -32,8 +34,10 @@ def resolve_sheet_name(workbook: pd.ExcelFile, aliases: list[str]) -> str:
     for sheet in workbook.sheet_names:
         if normalize_name(sheet) in wanted:
             return sheet
+    source = workbook.io
+    source_name = Path(source).name if isinstance(source, (str, Path)) else "uploaded workbook"
     raise KeyError(
-        f"Could not find sheet matching any of {aliases} in {Path(workbook.io).name}. "
+        f"Could not find sheet matching any of {aliases} in {source_name}. "
         f"Available: {workbook.sheet_names}"
     )
 
@@ -959,75 +963,86 @@ def write_sheet_with_aliases(writer: pd.ExcelWriter, sheet_name: str, df: pd.Dat
     df.to_excel(writer, sheet_name=sheet_name, index=False)
 
 
-def parse_args() -> argparse.Namespace:
-    base_dir = Path(__file__).resolve().parent
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+def build_combined_workbook(chdn_bytes: bytes, kna_bytes: bytes) -> tuple[bytes, dict[str, pd.DataFrame]]:
+    sheet_map: dict[str, pd.DataFrame] = {}
+    with pd.ExcelFile(BytesIO(chdn_bytes), engine="openpyxl") as chdn_workbook:
+        with pd.ExcelFile(BytesIO(kna_bytes), engine="openpyxl") as kna_workbook:
+            for canonical, aliases in TARGET_SHEETS.items():
+                sheet_map[canonical] = combine_sheet(chdn_workbook, kna_workbook, canonical, aliases)
 
-    parser = argparse.ArgumentParser(
-        description=(
-            "Combine CHDN and KNA reports; keep township-level rows only in Summary "
-            "and append Karenni Total rows in other target sheets."
+    if "indicators" in sheet_map:
+        sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_sheet_map(sheet_map)
+        sheet_map[AGE_SEMESTER_SHEET_NAME] = build_age_semester_from_sheet_map(sheet_map)
+    if "IDP" in sheet_map:
+        sheet_map[IDP_SEMESTER_SHEET_NAME] = build_idp_semester_from_sheet_map(sheet_map)
+    if "ALOD_cummu" in sheet_map:
+        sheet_map[AT_LEAST_ONE_SEMESTER_SHEET_NAME] = build_at_least_one_semester_from_alod(
+            sheet_map["ALOD_cummu"]
         )
-    )
-    parser.add_argument(
-        "--chdn",
-        type=Path,
-        default=base_dir / "CHDN_report_20260804_034801.xlsx",
-        help="Path to CHDN report workbook.",
-    )
-    parser.add_argument(
-        "--kna",
-        type=Path,
-        default=base_dir / "KNA_EPI_long_20260804_040627.xlsx",
-        help="Path to KNA long workbook.",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=base_dir / f"Karenni_combined_report_{timestamp}.xlsx",
-        help="Output workbook path.",
-    )
-    return parser.parse_args()
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        for sheet_name, df in sheet_map.items():
+            write_sheet_with_aliases(writer, sheet_name, df)
+    return buffer.getvalue(), sheet_map
 
 
 def main() -> None:
-    args = parse_args()
-    chdn_path: Path = args.chdn
-    kna_path: Path = args.kna
-    output_path: Path = args.output
+    st.set_page_config(page_title="Karenni CHDN + KNA Combiner", layout="wide")
+    st.title("Karenni Combination Builder")
+    st.caption("Combine CHDN and KNA reports, then download the combined workbook.")
 
-    missing = [p for p in [chdn_path, kna_path] if not p.exists()]
-    if missing:
-        lines = "\n".join(f"- {item}" for item in missing)
-        raise FileNotFoundError(f"Missing source workbook(s):\n{lines}")
+    chdn_upload = st.file_uploader("CHDN report workbook", type=["xlsx"], key="chdn")
+    kna_upload = st.file_uploader("KNA report workbook", type=["xlsx"], key="kna")
+    run_clicked = st.button("Generate combined workbook", type="primary", use_container_width=True)
 
-    sheet_map: dict[str, pd.DataFrame] = {}
-    try:
-        for canonical, aliases in TARGET_SHEETS.items():
-            sheet_map[canonical] = combine_sheet(chdn_path, kna_path, canonical, aliases)
-        if "indicators" in sheet_map:
-            sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_sheet_map(sheet_map)
-            sheet_map[AGE_SEMESTER_SHEET_NAME] = build_age_semester_from_sheet_map(sheet_map)
-        if "IDP" in sheet_map:
-            sheet_map[IDP_SEMESTER_SHEET_NAME] = build_idp_semester_from_sheet_map(sheet_map)
-        if "ALOD_cummu" in sheet_map:
-            sheet_map[AT_LEAST_ONE_SEMESTER_SHEET_NAME] = build_at_least_one_semester_from_alod(sheet_map["ALOD_cummu"])
-    except PermissionError as exc:
-        raise PermissionError(
-            "Cannot read one or more source workbooks. Close CHDN/KNA files in Excel and run again."
-        ) from exc
+    upload_signature = None
+    chdn_bytes = None
+    kna_bytes = None
+    if chdn_upload is not None and kna_upload is not None:
+        chdn_bytes = chdn_upload.getvalue()
+        kna_bytes = kna_upload.getvalue()
+        upload_signature = (
+            hashlib.sha256(chdn_bytes).hexdigest(),
+            hashlib.sha256(kna_bytes).hexdigest(),
+        )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-            for sheet_name, df in sheet_map.items():
-                write_sheet_with_aliases(writer, sheet_name, df)
-    except PermissionError as exc:
-        raise PermissionError(
-            "Cannot write output file. Close the workbook in Excel and run again."
-        ) from exc
+    if run_clicked:
+        st.session_state.pop("generated_workbook", None)
+        if upload_signature is None:
+            st.error("Upload both the CHDN and KNA workbooks first.")
+        else:
+            try:
+                with st.spinner("Combining workbook sheets..."):
+                    workbook_bytes, sheets = build_combined_workbook(chdn_bytes, kna_bytes)
+                output_name = f"Karenni_combined_report_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+                st.session_state["generated_workbook"] = (
+                    upload_signature,
+                    workbook_bytes,
+                    sheets,
+                    output_name,
+                )
+                st.success("Combined workbook is ready.")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Could not combine the workbooks: {exc}")
 
-    print(f"Wrote combined report: {output_path}")
+    generated = st.session_state.get("generated_workbook")
+    if generated is None or generated[0] != upload_signature:
+        return
+
+    _, workbook_bytes, sheets, output_name = generated
+    st.download_button(
+        "Download combined workbook",
+        data=workbook_bytes,
+        file_name=output_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+    preview_sheet = st.selectbox("Preview sheet", list(sheets))
+    preview = sheets[preview_sheet]
+    st.dataframe(preview.head(500), use_container_width=True, height=420)
+    if len(preview) > 500:
+        st.caption(f"Showing 500 of {len(preview):,} rows. The downloaded workbook contains all rows.")
 
 
 if __name__ == "__main__":
