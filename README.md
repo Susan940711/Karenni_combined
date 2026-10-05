@@ -21,8 +21,7 @@ For `semester report`, it is generated from the combined `indicators` sheet by r
 For other target sheets, it appends new rows in `Organization` as `Karenni Total` by summing reported numeric values from CHDN and KNA.
 
 ## Files
-- `combine_karenni_reports.py` - command-line combiner
-- `streamlit_karenni_combiner.py` - Streamlit web app
+- `combine_karenni_reports.py` - complete Streamlit app and workbook processing logic
 - `requirements.txt` - Python dependencies
 
 ## Setup
@@ -30,16 +29,13 @@ For other target sheets, it appends new rows in `Organization` as `Karenni Total
 pip install -r requirements.txt
 ```
 
-## Run Streamlit App
+## Run Locally
 ```powershell
-streamlit run streamlit_karenni_combiner.py
+streamlit run combine_karenni_reports.py
 ```
 
-## Run CLI
-```powershell
-python combine_karenni_reports.py --chdn CHDN_report.xlsx --kna KNA_report.xlsx --output Karenni_combined.xlsx
-```
+For Streamlit Community Cloud, set **Main file path** to `combine_karenni_reports.py`.
 
 ## Notes
-- Close source Excel files in Microsoft Excel before running.
-- The Streamlit app allows upload and download directly, and can also save output to the current folder.
+- Upload both `.xlsx` source workbooks, then select **Generate combined workbook**.
+- The app processes uploads in memory and downloads the result directly; it does not write generated files to the deployment filesystem.
