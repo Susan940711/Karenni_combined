@@ -913,18 +913,27 @@ def build_at_least_one_semester_from_alod(alod_df: pd.DataFrame) -> pd.DataFrame
     return output.reset_index(drop=True)
 
 
-def read_target_sheet(path: Path, canonical_sheet: str, aliases: list[str]) -> pd.DataFrame:
-    workbook = pd.ExcelFile(path)
-    sheet_name = resolve_sheet_name(workbook, aliases)
-    df = pd.read_excel(path, sheet_name=sheet_name, engine="openpyxl")
-    df = normalize_columns(df)
+def read_target_sheet(path: Path | pd.ExcelFile, canonical_sheet: str, aliases: list[str]) -> pd.DataFrame:
+    owns_workbook = not isinstance(path, pd.ExcelFile)
+    workbook = pd.ExcelFile(path, engine="openpyxl") if owns_workbook else path
+    try:
+        sheet_name = resolve_sheet_name(workbook, aliases)
+        df = normalize_columns(workbook.parse(sheet_name=sheet_name))
+    finally:
+        if owns_workbook:
+            workbook.close()
 
     # Use canonical naming for output consistency.
     df.attrs["sheet_name"] = canonical_sheet
     return df
 
 
-def combine_sheet(chdn_path: Path, kna_path: Path, canonical_sheet: str, aliases: list[str]) -> pd.DataFrame:
+def combine_sheet(
+    chdn_path: Path | pd.ExcelFile,
+    kna_path: Path | pd.ExcelFile,
+    canonical_sheet: str,
+    aliases: list[str],
+) -> pd.DataFrame:
     chdn_df = read_target_sheet(chdn_path, canonical_sheet, aliases)
     kna_df = read_target_sheet(kna_path, canonical_sheet, aliases)
 
