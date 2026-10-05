@@ -28,8 +28,10 @@ BASE_DIR = Path(__file__).resolve().parent
 
 def build_combined_workbook(chdn_path: Path, kna_path: Path) -> tuple[bytes, dict[str, pd.DataFrame]]:
     sheet_map: dict[str, pd.DataFrame] = {}
-    for canonical, aliases in TARGET_SHEETS.items():
-        sheet_map[canonical] = combine_sheet(chdn_path, kna_path, canonical, aliases)
+    with pd.ExcelFile(chdn_path, engine="openpyxl") as chdn_workbook:
+        with pd.ExcelFile(kna_path, engine="openpyxl") as kna_workbook:
+            for canonical, aliases in TARGET_SHEETS.items():
+                sheet_map[canonical] = combine_sheet(chdn_workbook, kna_workbook, canonical, aliases)
 
     if "indicators" in sheet_map:
         sheet_map[SEMESTER_REPORT_SHEET_NAME] = build_semester_report_from_sheet_map(sheet_map)
@@ -76,42 +78,64 @@ def main() -> None:
 
     default_output_name = f"Karenni_combined_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     output_name = st.text_input("Output filename", value=default_output_name)
+    save_to_folder = st.checkbox(
+        "Also save output to Karenni_combination folder",
+        value=True,
+        help="If enabled, this writes a copy beside the app/script files.",
+    )
 
     run_clicked = st.button("Generate Combined Workbook", type="primary", use_container_width=True)
+    upload_signature = tuple(
+        (uploaded.name, uploaded.size, getattr(uploaded, "file_id", None)) if uploaded is not None else None
+        for uploaded in (chdn_upload, kna_upload)
+    )
 
-    if not run_clicked:
-        return
-
-    if chdn_upload is None or kna_upload is None:
-        st.error("Please upload both CHDN and KNA Excel files.")
-        return
-
-    temp_paths: list[Path] = []
-    try:
-        chdn_path = save_uploaded_file(chdn_upload, "chdn_")
-        kna_path = save_uploaded_file(kna_upload, "kna_")
-        temp_paths.extend([chdn_path, kna_path])
-
-        workbook_bytes, sheets = build_combined_workbook(chdn_path, kna_path)
-
-        save_to_folder = st.checkbox(
-            "Also save output to Karenni_combination folder",
-            value=True,
-            help="If enabled, this writes a copy beside the app/script files.",
-        )
-
-        safe_name = output_name.strip() or default_output_name
-        if not safe_name.lower().endswith(".xlsx"):
-            safe_name = f"{safe_name}.xlsx"
-
-        if save_to_folder:
-            output_path = BASE_DIR / safe_name
-            with open(output_path, "wb") as f:
-                f.write(workbook_bytes)
-            st.success(f"Workbook saved to: {output_path}")
+    if run_clicked:
+        st.session_state.pop("generated_workbook", None)
+        if chdn_upload is None or kna_upload is None:
+            st.error("Please upload both CHDN and KNA Excel files.")
         else:
-            st.success("Workbook generated successfully.")
+            temp_paths: list[Path] = []
+            try:
+                chdn_path = save_uploaded_file(chdn_upload, "chdn_")
+                kna_path = save_uploaded_file(kna_upload, "kna_")
+                temp_paths.extend([chdn_path, kna_path])
 
+                workbook_bytes, sheets = build_combined_workbook(chdn_path, kna_path)
+
+                safe_name = Path(output_name.strip()).name
+                if safe_name in {"", ".", ".."}:
+                    safe_name = default_output_name
+                if not safe_name.lower().endswith(".xlsx"):
+                    safe_name = f"{safe_name}.xlsx"
+
+                if save_to_folder:
+                    output_path = BASE_DIR / safe_name
+                    with open(output_path, "wb") as f:
+                        f.write(workbook_bytes)
+                    st.success(f"Workbook saved to: {output_path}")
+                else:
+                    st.success("Workbook generated successfully.")
+
+                st.session_state["generated_workbook"] = (
+                    upload_signature,
+                    workbook_bytes,
+                    sheets,
+                    safe_name,
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Failed to combine files: {exc}")
+                st.info("If the source files are open in Excel, close them and try again.")
+            finally:
+                for path in temp_paths:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+    generated = st.session_state.get("generated_workbook")
+    if generated is not None and generated[0] == upload_signature:
+        _, workbook_bytes, sheets, safe_name = generated
         st.download_button(
             label="Download Combined Workbook",
             data=workbook_bytes,
@@ -123,16 +147,6 @@ def main() -> None:
         st.subheader("Preview")
         preview_sheet = st.selectbox("Choose a sheet to preview", list(sheets.keys()))
         st.dataframe(sheets[preview_sheet], use_container_width=True, height=420)
-
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Failed to combine files: {exc}")
-        st.info("If the source files are open in Excel, close them and try again.")
-    finally:
-        for path in temp_paths:
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                pass
 
 
 if __name__ == "__main__":
