@@ -201,6 +201,11 @@ def normalize_idp_grouping_values(df: pd.DataFrame) -> pd.DataFrame:
 
         working[indicator_col] = working[indicator_col].apply(normalize_indicator)
 
+    dimension_cols, _ = detect_dimension_columns(working)
+    for col in dimension_cols:
+        normalized = working[col].apply(clean_text)
+        working[col] = normalized.mask(normalized == "", pd.NA)
+
     return working
 
 
