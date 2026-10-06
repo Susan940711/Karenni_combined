@@ -816,7 +816,19 @@ def build_idp_semester_from_indicators(idp_df: pd.DataFrame) -> pd.DataFrame:
     )
 
     output[metric_cols] = output[metric_cols].fillna(0)
-    return output.reset_index(drop=True)
+
+    total_org_mask = output[organization_key].astype("string").str.strip().str.casefold() == "karenni total"
+    source_rows = output.loc[~total_org_mask]
+    if source_rows.empty:
+        source_rows = output
+
+    group_keys = [period_key, project_key, indicator_key]
+    combined = (
+        source_rows.groupby(group_keys, dropna=False, as_index=False, sort=False)[metric_cols]
+        .sum()
+    )
+    combined[organization_key] = "Karenni Total"
+    return combined[[period_key, organization_key, project_key, indicator_key, *metric_cols]].reset_index(drop=True)
 
 
 def build_idp_semester_from_sheet_map(sheet_map: dict[str, pd.DataFrame]) -> pd.DataFrame:
