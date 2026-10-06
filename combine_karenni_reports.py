@@ -552,8 +552,9 @@ def build_semester_report_from_indicators(
         return indicators_df.copy()
 
     period_col = find_column_by_token(indicators_df, "period")
-    if period_col is None:
-        raise KeyError("Period column not found in indicators sheet.")
+    time_col = period_col or find_column_by_token(indicators_df, "year")
+    if time_col is None:
+        raise KeyError("Period or Year column not found in indicators sheet.")
     metric_frame = build_semester_metric_frame(indicators_df)
     dimension_cols, _ = detect_dimension_columns(metric_frame)
     organization_col = next((c for c in metric_frame.columns if normalize_name(c) == "organization"), None)
@@ -565,10 +566,10 @@ def build_semester_report_from_indicators(
     ]
 
     output_columns = [col for col in metric_frame.columns if col in dimension_cols or col == organization_col]
-    if period_col not in output_columns:
-        output_columns = [period_col, *output_columns]
-    output_columns = [col for col in output_columns if col != period_col]
-    output_columns = [period_col, *output_columns]
+    if time_col not in output_columns:
+        output_columns = [time_col, *output_columns]
+    output_columns = [col for col in output_columns if col != time_col]
+    output_columns = [time_col, *output_columns]
 
     semester_df = metric_frame.reindex(columns=output_columns + metric_columns).copy()
     return semester_df.reset_index(drop=True)
@@ -634,12 +635,13 @@ def build_age_semester_from_indicators(indicators_df: pd.DataFrame) -> pd.DataFr
         return frame[present].sum(axis=1, min_count=1).fillna(0)
 
     period_col = find_column_by_token(working, "period")
+    time_col = period_col or find_column_by_token(working, "year")
     organization_col = next((c for c in working.columns if normalize_name(c) == "organization"), None)
     project_col = next((c for c in working.columns if "project" in normalize_name(c)), None)
     indicator_col = next((c for c in working.columns if normalize_name(c) == "indicator"), None)
 
     output = pd.DataFrame(index=working.index)
-    output["Period"] = working[period_col] if period_col is not None else ""
+    output[time_col or "Period"] = working[time_col] if time_col is not None else ""
     output["Organization"] = working[organization_col] if organization_col is not None else ""
     output["Project Name"] = working[project_col] if project_col is not None else ""
     output["indicator"] = working[indicator_col] if indicator_col is not None else ""
